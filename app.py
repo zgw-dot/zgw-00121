@@ -903,6 +903,12 @@ def check_alert_rules(db, voucher_no, voucher_id, cashier, diff_amount, shift_da
                 reason = f"收银员 {cashier} 退回次数 {returned_count} ≥ 阈值 {int(rule['threshold'])}"
 
         if hit:
+            existing = db.execute("""
+                SELECT id FROM alert_logs WHERE voucher_no = ? AND rule_id = ?
+            """, (voucher_no, rule["id"])).fetchone()
+            if existing:
+                triggered.append({"rule_name": rule["name"], "rule_type": rule["rule_type"], "reason": reason})
+                continue
             if cur is None:
                 c = db.cursor()
             else:
@@ -935,7 +941,7 @@ def api_import_logs():
 # ---------- Alert Rules ---------- #
 
 @app.route("/api/alert-rules", methods=["GET"])
-@login_required
+@role_required(ROLE_ADMIN, ROLE_MANAGER)
 def api_list_alert_rules():
     db = get_db()
     rows = db.execute("SELECT * FROM alert_rules ORDER BY id ASC").fetchall()

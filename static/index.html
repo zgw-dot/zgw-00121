@@ -199,17 +199,17 @@ tbody tr:hover{background:#f9fafb}
       </div>
     </div>
     <div id="tabAlertPanel" class="hidden">
+      {% if user.role in ['admin','manager'] %}
       <div class="panel-section">
         <h3>📊 预警规则管理
-          {% if user.role in ['admin','manager'] %}
           <button class="btn btn-sm btn-primary" style="margin-left:12px" onclick="openCreateRule()">＋ 新建规则</button>
           <button class="btn btn-sm btn-success btn-outline" onclick="exportAlertRulesCSV()">导出规则</button>
           <button class="btn btn-sm btn-warning" onclick="document.getElementById('importRuleFile').click()">导入规则</button>
           <input id="importRuleFile" type="file" accept=".csv" class="hidden" onchange="importAlertRulesCSV(this)">
-          {% endif %}
         </h3>
         <div id="ruleList"></div>
       </div>
+      {% endif %}
       <div class="panel-section">
         <h3>🔔 预警记录</h3>
         <div class="table-wrap">
@@ -851,12 +851,18 @@ async function importCSV(input){
 // ---------- Alert Rules ---------- //
 
 async function loadAlertPanel(){
-  const [rules, logs] = await Promise.all([
-    api('/api/alert-rules'),
-    api('/api/alert-logs')
-  ]);
-  renderRuleList(rules.data?.rules || []);
-  renderAlertLogs(logs.data?.logs || []);
+  const reqs = [api('/api/alert-logs')];
+  const isMgr = ['admin','manager'].includes(ROLE);
+  if(isMgr) reqs.unshift(api('/api/alert-rules'));
+  const results = await Promise.all(reqs);
+  let logs;
+  if(isMgr){
+    renderRuleList(results[0].data?.rules || []);
+    logs = results[1].data?.logs || [];
+  } else {
+    logs = results[0].data?.logs || [];
+  }
+  renderAlertLogs(logs);
 }
 
 function renderRuleList(rules){

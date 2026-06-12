@@ -519,7 +519,24 @@ def run():
         else: failed += 1
 
         s, d = cash.get("/api/alert-rules")
-        if assert_eq("Cashier can read rules (200)", s, 200): passed += 1
+        if assert_eq("Cashier cannot read rule config (403)", s, 403): passed += 1
+        else: failed += 1
+
+        s, d = cash.post("/api/alert-rules/import", form_data={
+            "file": ("dummy.csv", "规则名称,规则类型,阈值\nx,single_amount,100\n".encode("utf-8-sig"), "text/csv")
+        })
+        if assert_eq("Cashier cannot import rules CSV (403)", s, 403): passed += 1
+        else: failed += 1
+
+        exp_req = urllib.request.Request(BASE_URL + "/api/alert-rules/export.csv")
+        exp_ch = cash._cookie_header()
+        if exp_ch: exp_req.add_header("Cookie", exp_ch)
+        try:
+            with urllib.request.urlopen(exp_req) as exp_resp:
+                exp_status = exp_resp.status
+        except urllib.error.HTTPError as e:
+            exp_status = e.code
+        if assert_eq("Cashier cannot export rules CSV (403)", exp_status, 403): passed += 1
         else: failed += 1
 
         print("\n--- Test 13: Alert triggered on voucher create/submit ---")
@@ -596,6 +613,89 @@ def run():
         s, d = cash.get("/api/alert-logs?voucher_no=T-ALERT-001")
         if expect("Filter alert logs by voucher_no", len(d.get("logs", [])) > 0,
                   f"count={len(d.get('logs',[]))}"): passed += 1
+        else: failed += 1
+
+        print("\n--- Test 16b: Deduplication - same rule + same voucher = single alert log ---")
+        con = sqlite3.connect(str(DB_PATH))
+        con.row_factory = sqlite3.Row
+        rows = con.execute(
+            "SELECT rule_id, COUNT(*) AS c FROM alert_logs WHERE voucher_no = ? GROUP BY rule_id",
+            ("T-ALERT-001",)
+        ).fetchall()
+        con.close()
+        all_single = all(r["c"] == 1 for r in rows)
+        if expect("Each rule for T-ALERT-001 logged exactly once", all_single and len(rows) > 0,
+                  f"counts={[(r['rule_id'], r['c']) for r in rows]}"): passed += 1
+        else: failed += 1
+
+        s, d = cash.get(f"/api/vouchers/{vid_alert1}")
+        detail_alerts = d.get("alerts", [])
+        rule_ids_in_detail = [a.get("rule_id") for a in detail_alerts]
+        if expect("Detail alerts have no duplicates", len(rule_ids_in_detail) == len(set(rule_ids_in_detail)) and len(detail_alerts) > 0,
+                  f"alerts={len(detail_alerts)} unique={len(set(rule_ids_in_detail))}"): passed += 1
+        else: failed += 1
+
+        s, d = cash.get("/api/vouchers")
+        vouchers = d.get("vouchers", [])
+        alert_voucher = next((v for v in vouchers if v["voucher_no"] == "T-ALERT-001"), None)
+        wr = alert_voucher.get("warning_reasons", []) if alert_voucher else []
+        if expect("Voucher list warning_reasons have no duplicates",
+                  len(wr) == len(set(w.get("rule_name") for w in wr)) and len(wr) > 0,
+                  f"wr_count={len(wr)}"): passed += 1
+        else: failed += 1
+
+        print("\n--- Test 16c: Cashier sees alert results but NOT rule configs ---")
+        s, d = cash.get("/api/alert-rules")
+        if expect("Cashier cannot fetch alert rules (403)", s == 403, f"status={s}"): passed += 1
+        else: failed += 1
+
+        s, d = cash.get("/api/alert-logs")
+        if expect("Cashier CAN fetch alert logs (200)", s == 200 and isinstance(d.get("logs"), list),
+                  f"status={s} has_logs={isinstance(d.get('logs'), list)}"): passed += 1
+        else: failed += 1
+
+        s, d = cash.get("/api/vouchers")
+        vouchers = d.get("vouchers", [])
+        alert_voucher = next((v for v in vouchers if v["voucher_no"] == "T-ALERT-001"), None)
+        if expect("Cashier sees warning_reasons in voucher list",
+                  alert_voucher and len(alert_voucher.get("warning_reasons", [])) > 0,
+                  f"reasons={alert_voucher.get('warning_reasons',[]) if alert_voucher else 'N/A'}"): passed += 1
+        else: failed += 1
+
+        s, d = cash.get(f"/api/vouchers/{vid_alert1}")
+        if expect("Cashier sees alerts in voucher detail",
+                  len(d.get("alerts", [])) > 0 and d["alerts"][0].get("alert_reason"),
+                  f"alerts={d.get('alerts', [])}"): passed += 1
+        else: failed += 1
+
+        print("\n--- Test 16d: Original flows still work (review/close/revoke regression) ---")
+        s, d = cash.post("/api/vouchers", {
+            "voucher_no":"T-REG-001",
+            "shift_code":"晚班",
+            "shift_date":"2026-06-12",
+            "cashier":"小钱",
+            "diff_amount": 10.00,
+            "reason":"",
+            "remark":"回归测试正常单据",
+        })
+        vid_reg = d.get("id")
+        s, d = cash.post(f"/api/vouchers/{vid_reg}/submit", {"remark":"回归测试正常提交"})
+        if assert_eq("Normal submit still works (200)", s, 200): passed += 1
+        else: failed += 1
+
+        s, d = man.post(f"/api/vouchers/{vid_reg}/review", {"action":"approve","note":"正常复核"})
+        if assert_eq("Normal review still works (200)", s, 200): passed += 1
+        else: failed += 1
+
+        s, d = man.post(f"/api/vouchers/{vid_reg}/close", {"note":"正常关闭"})
+        if assert_eq("Normal close still works (200)", s, 200): passed += 1
+        else: failed += 1
+
+        s, d = man.post(f"/api/vouchers/{vid_reg}/revoke", {"reason":"回归测试撤销"})
+        if assert_eq("Normal revoke still works (200)", s, 200): passed += 1
+        else: failed += 1
+        if expect("Revoke returns new voucher_no", bool(d.get("new_voucher_no")),
+                  f"new_no={d.get('new_voucher_no')}"): passed += 1
         else: failed += 1
 
         print("\n--- Test 17: Alert rules CSV import/export ---")
