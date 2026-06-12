@@ -2213,17 +2213,8 @@ def api_delete_filter_scheme(scheme_id):
                      f"方案ID={scheme_id}, 方案名称={existing['name']}, 原默认={'是' if was_default else '否'}")
 
     if was_default:
-        next_default = cur.execute(
-            "SELECT id FROM filter_schemes WHERE username = ? ORDER BY id ASC LIMIT 1",
-            (user["username"],)
-        ).fetchone()
-        if next_default:
-            cur.execute(
-                "UPDATE filter_schemes SET is_default = 1 WHERE id = ? AND username = ?",
-                (next_default["id"], user["username"])
-            )
-            add_operation_log(cur, "删除默认方案后重置默认", user["username"], user["role"],
-                             f"原方案={existing['name']}已删除，系统自动选择新默认方案")
+        add_operation_log(cur, "删除默认方案后回系统默认", user["username"], user["role"],
+                         f"原默认方案={existing['name']}已删除，回退到系统默认筛选")
 
     db.commit()
 

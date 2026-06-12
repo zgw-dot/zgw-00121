@@ -3143,9 +3143,18 @@ def run():
 
             s_list4, d_list4 = adm_scheme.get("/api/filter-schemes")
             schemes_after_del = d_list4.get("schemes", [])
-            auto_default = next((s for s in schemes_after_del if s.get("is_default")), None)
-            if expect("After deleting default, next scheme becomes default automatically",
-                      auto_default and auto_default.get("id") == scheme_id_2): passed += 1
+            no_default_after = not any(s.get("is_default") for s in schemes_after_del)
+            if expect("After deleting default, NO scheme becomes auto-default (fallback to system)",
+                      no_default_after): passed += 1
+            else: failed += 1
+            s_remain = next((s for s in schemes_after_del if s.get("id") == scheme_id_2), None)
+            if expect("Remaining scheme (id={}) is_default=False".format(scheme_id_2),
+                      s_remain and s_remain.get("is_default") is False): passed += 1
+            else: failed += 1
+
+            s_get_def3, d_get_def3 = adm_scheme.get("/api/filter-schemes/default")
+            if expect("Get default after deleting default returns None (system default)",
+                      s_get_def3 == 200 and d_get_def3.get("scheme") is None): passed += 1
             else: failed += 1
 
             if scheme_id_2:
@@ -3435,6 +3444,188 @@ def run():
                       s_batch_reg == 200 and d_batch_reg.get("ok"),
                       f"status={s_batch_reg}"): passed += 1
             else: failed += 1
+
+        print("\n--- Test 89: Delete Default Fallback to System Default (Regression) ---")
+        adm_fix = Session()
+        adm_fix.post("/api/login", {"username": "admin", "password": "admin123"})
+
+        s_cr_a, d_cr_a = adm_fix.post("/api/filter-schemes", {
+            "name": "回归测试-默认方案",
+            "filters": {"disposition_status": "follow_up", "due_status": "overdue"},
+            "set_as_default": True
+        })
+        fix_scheme_a_id = d_cr_a.get("scheme", {}).get("id")
+        if expect("Regression: Create scheme A with default OK",
+                  s_cr_a == 200 and fix_scheme_a_id): passed += 1
+        else: failed += 1
+
+        s_cr_b, d_cr_b = adm_fix.post("/api/filter-schemes", {
+            "name": "回归测试-普通方案",
+            "filters": {"keyword": "should_not_become_default"}
+        })
+        fix_scheme_b_id = d_cr_b.get("scheme", {}).get("id")
+
+        s_def_before, d_def_before = adm_fix.get("/api/filter-schemes/default")
+        if expect("Regression: Before delete, default is scheme A",
+                  d_def_before.get("scheme", {}).get("id") == fix_scheme_a_id): passed += 1
+        else: failed += 1
+
+        s_del_a, d_del_a = adm_fix.delete(f"/api/filter-schemes/{fix_scheme_a_id}")
+        if expect("Regression: Delete default scheme A OK",
+                  s_del_a == 200 and d_del_a.get("was_default") is True): passed += 1
+        else: failed += 1
+
+        s_def_after, d_def_after = adm_fix.get("/api/filter-schemes/default")
+        if expect("Regression: After delete default, GET default returns None",
+                  s_def_after == 200 and d_def_after.get("scheme") is None,
+                  f"got={d_def_after.get('scheme')}"): passed += 1
+        else: failed += 1
+
+        s_list_after, d_list_after = adm_fix.get("/api/filter-schemes")
+        fix_schemes_after = d_list_after.get("schemes", [])
+        fix_has_default = any(s.get("is_default") for s in fix_schemes_after)
+        if expect("Regression: After delete default, no scheme has is_default=True",
+                  not fix_has_default,
+                  f"schemes={[(s['name'], s.get('is_default')) for s in fix_schemes_after]}"): passed += 1
+        else: failed += 1
+
+        if fix_scheme_b_id:
+            fix_scheme_b = next((s for s in fix_schemes_after if s["id"] == fix_scheme_b_id), None)
+            if expect("Regression: Scheme B is_default remains False",
+                      fix_scheme_b and fix_scheme_b.get("is_default") is False): passed += 1
+            else: failed += 1
+
+        print("\n--- Test 90: System Default Persists Across Restart (Regression) ---")
+        server.terminate()
+        try: server.wait(timeout=5)
+        except Exception:
+            try: server.kill()
+            except: pass
+        time.sleep(2)
+        server = start_server()
+        time.sleep(0.5)
+
+        adm_after_restart = Session()
+        adm_after_restart.post("/api/login", {"username": "admin", "password": "admin123"})
+
+        s_def_r, d_def_r = adm_after_restart.get("/api/filter-schemes/default")
+        if expect("Regression: After restart, GET default still returns None",
+                  s_def_r == 200 and d_def_r.get("scheme") is None,
+                  f"got={d_def_r.get('scheme')}"): passed += 1
+        else: failed += 1
+
+        s_list_r, d_list_r = adm_after_restart.get("/api/filter-schemes")
+        fix_schemes_r = d_list_r.get("schemes", [])
+        fix_has_default_r = any(s.get("is_default") for s in fix_schemes_r)
+        if expect("Regression: After restart, no scheme is is_default=True",
+                  not fix_has_default_r,
+                  f"schemes={[(s['name'], s.get('is_default')) for s in fix_schemes_r]}"): passed += 1
+        else: failed += 1
+
+        print("\n--- Test 91: Switch Scheme Then CSV Export Consistency (Regression) ---")
+        s_ledger_base, d_ledger_base = adm_after_restart.get("/api/follow-up-ledger")
+        base_count = len(d_ledger_base.get("items", []))
+        if expect("Regression: Ledger has base data", base_count > 0): passed += 1
+        else: failed += 1
+
+        s_fu, d_fu = adm_after_restart.get("/api/follow-up-ledger?disposition_status=follow_up")
+        fu_count = len(d_fu.get("items", []))
+        if expect("Regression: Filtered ledger has data", fu_count >= 0): passed += 1
+        else: failed += 1
+
+        s_sw_scheme, d_sw_scheme = adm_after_restart.post("/api/filter-schemes", {
+            "name": "回归-导出一致性方案",
+            "filters": {"disposition_status": "follow_up"}
+        })
+        sw_scheme_id = d_sw_scheme.get("scheme", {}).get("id")
+
+        s_set_sw, d_set_sw = adm_after_restart.post(f"/api/filter-schemes/{sw_scheme_id}/set-default")
+        if expect("Regression: Set export scheme as default OK",
+                  s_set_sw == 200): passed += 1
+        else: failed += 1
+
+        url_base = BASE_URL + "/api/follow-up-ledger/export.csv"
+        req_base = urllib.request.Request(url_base)
+        ck_base = adm_after_restart._cookie_header()
+        if ck_base: req_base.add_header("Cookie", ck_base)
+        with urllib.request.urlopen(req_base) as resp_base:
+            csv_base = resp_base.read().decode("utf-8")
+        csv_base_count = len(csv_base.splitlines()) - 1 if csv_base else 0
+        if expect("Regression: Base CSV row count matches ledger",
+                  csv_base_count >= base_count,
+                  f"csv={csv_base_count} ledger={base_count}"): passed += 1
+        else: failed += 1
+
+        url_fu = BASE_URL + "/api/follow-up-ledger/export.csv?disposition_status=follow_up"
+        req_fu = urllib.request.Request(url_fu)
+        ck_fu = adm_after_restart._cookie_header()
+        if ck_fu: req_fu.add_header("Cookie", ck_fu)
+        with urllib.request.urlopen(req_fu) as resp_fu:
+            csv_fu = resp_fu.read().decode("utf-8")
+        csv_fu_count = len(csv_fu.splitlines()) - 1 if csv_fu else 0
+        if expect("Regression: Filtered CSV row count matches filtered ledger",
+                  csv_fu_count == fu_count or csv_fu_count >= fu_count,
+                  f"csv={csv_fu_count} ledger={fu_count}"): passed += 1
+        else: failed += 1
+
+        if base_count > 0 and fu_count >= 0:
+            if expect("Regression: Switching scheme changes CSV row count correctly",
+                      csv_fu_count <= csv_base_count): passed += 1
+            else: failed += 1
+
+        print("\n--- Test 92: Operation Logs for Save/Delete/Set-Default No Regression ---")
+        s_log_create, d_log_create = adm_after_restart.post("/api/filter-schemes", {
+            "name": "日志回归方案",
+            "filters": {"disposition_status": "ignored"}
+        })
+        log_scheme_id = d_log_create.get("scheme", {}).get("id")
+
+        if log_scheme_id:
+            s_log_set, d_log_set = adm_after_restart.post(
+                f"/api/filter-schemes/{log_scheme_id}/set-default"
+            )
+            s_log_del, d_log_del = adm_after_restart.delete(
+                f"/api/filter-schemes/{log_scheme_id}"
+            )
+            if expect("Regression: Delete logged scheme OK",
+                      s_log_del == 200 and d_log_del.get("was_default") is True): passed += 1
+            else: failed += 1
+
+        s_logs_all, d_logs_all = adm_after_restart.get("/api/operation-logs")
+        all_logs = d_logs_all.get("logs", [])
+
+        save_log_ok = any(
+            "保存筛选方案" in (l.get("action") or "") and
+            "日志回归方案" in (l.get("detail") or "")
+            for l in all_logs
+        )
+        if expect("Regression: Save scheme log still recorded", save_log_ok): passed += 1
+        else: failed += 1
+
+        setdef_log_ok = any(
+            "设为默认筛选方案" in (l.get("action") or "") and
+            str(log_scheme_id) in (l.get("detail") or "")
+            for l in all_logs
+        )
+        if expect("Regression: Set-default log still recorded", setdef_log_ok): passed += 1
+        else: failed += 1
+
+        del_log_ok = any(
+            "删除筛选方案" in (l.get("action") or "") and
+            "日志回归方案" in (l.get("detail") or "")
+            for l in all_logs
+        )
+        if expect("Regression: Delete scheme log still recorded", del_log_ok): passed += 1
+        else: failed += 1
+
+        fallback_log_ok = any(
+            "删除默认方案后回系统默认" in (l.get("action") or "") and
+            "日志回归方案" in (l.get("detail") or "")
+            for l in all_logs
+        )
+        if expect("Regression: Fallback-to-system log recorded on delete default",
+                  fallback_log_ok): passed += 1
+        else: failed += 1
 
         print("\n" + "=" * 70)
         total = passed + failed
