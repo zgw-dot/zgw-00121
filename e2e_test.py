@@ -820,6 +820,285 @@ def run():
                   f"actions={[l.get('action') for l in d['logs'][:5]]}"): passed += 1
         else: failed += 1
 
+        print("\n--- Test 23: Disposition Permission Tests ---")
+        adm2 = Session()
+        adm2.post("/api/login", {"username":"admin","password":"admin123"})
+        man2 = Session()
+        man2.post("/api/login", {"username":"manager","password":"manager123"})
+        cash2 = Session()
+        cash2.post("/api/login", {"username":"cashier","password":"cashier123"})
+
+        s, d = adm2.post("/api/alert-rules", {
+            "name": "单笔超100",
+            "rule_type": "single_amount",
+            "threshold": 100,
+            "description": "测试处置权限",
+            "enabled": True
+        })
+
+        s, d = cash2.post("/api/vouchers", {
+            "voucher_no":"T-DISP-001",
+            "shift_code":"早班",
+            "shift_date":"2026-06-12",
+            "cashier":"测试员",
+            "diff_amount": 500.00,
+            "reason":"系统差异",
+            "remark":"测试处置",
+        })
+        vid_disp = d.get("id")
+
+        s, d = cash2.get(f"/api/vouchers/{vid_disp}")
+        alerts = d.get("alerts", [])
+        if expect("Voucher has alerts for disposition test", len(alerts) > 0, f"alerts={len(alerts)}"): passed += 1
+        else: failed += 1
+
+        alert_id = alerts[0]["id"]
+        alert_version = alerts[0]["disposition_version"]
+
+        s, d = cash2.post(f"/api/alert-logs/{alert_id}/disposition", {
+            "disposition_status": "confirmed",
+            "disposition_note": "收银员尝试处置",
+            "disposition_version": alert_version
+        })
+        if assert_eq("Cashier cannot update disposition (403)", s, 403): passed += 1
+        else: failed += 1
+
+        s, d = man2.post(f"/api/alert-logs/{alert_id}/disposition", {
+            "disposition_status": "confirmed",
+            "disposition_note": "值班长已核实，确认为系统差异",
+            "disposition_version": alert_version
+        })
+        if expect("Manager can update disposition (200)", s == 200 and d.get("ok"), f"status={s}"): passed += 1
+        else: failed += 1
+        if expect("Disposition updated with handler", d.get("alert", {}).get("disposition_handler") == "manager",
+                  f"handler={d.get('alert',{}).get('disposition_handler')}"): passed += 1
+        else: failed += 1
+        if expect("Disposition version incremented", d.get("alert", {}).get("disposition_version") == alert_version + 1,
+                  f"version={d.get('alert',{}).get('disposition_version')}"): passed += 1
+        else: failed += 1
+
+        print("\n--- Test 24: Disposition Conflict Detection ---")
+        s, d = man2.get(f"/api/vouchers/{vid_disp}")
+        current_alert = d.get("alerts", [])[0]
+        current_version = current_alert["disposition_version"]
+
+        man3 = Session()
+        man3.post("/api/login", {"username":"manager","password":"manager123"})
+        s2, d2 = man3.post(f"/api/alert-logs/{alert_id}/disposition", {
+            "disposition_status": "follow_up",
+            "disposition_note": "经理B处置：需要转财务核实",
+            "disposition_version": current_version
+        })
+        if expect("Manager B first disposition succeeds", s2 == 200, f"status={s2}"): passed += 1
+        else: failed += 1
+
+        s, d = man2.post(f"/api/alert-logs/{alert_id}/disposition", {
+            "disposition_status": "ignored",
+            "disposition_note": "经理A处置：误报，忽略",
+            "disposition_version": current_version
+        })
+        if assert_eq("Stale disposition rejected with 409 conflict", s, 409): passed += 1
+        else: failed += 1
+        if expect("Conflict error mentions other user processing",
+                  "已被其他用户处理过" in (d.get("error","") or ""),
+                  f"error={d.get('error','')}"): passed += 1
+        else: failed += 1
+        if expect("Conflict response includes current state", d.get("current") is not None): passed += 1
+        else: failed += 1
+
+        print("\n--- Test 25: Disposition Persistence Across Restart ---")
+        s, d = man2.get(f"/api/vouchers/{vid_disp}")
+        alerts_before = d.get("alerts", [])
+        disp_before = alerts_before[0]
+
+        server.terminate()
+        try: server.wait(timeout=5)
+        except Exception:
+            try: server.kill()
+            except: pass
+        time.sleep(2)
+
+        con = sqlite3.connect(str(DB_PATH))
+        con.row_factory = sqlite3.Row
+        row = con.execute("SELECT * FROM alert_logs WHERE id = ?", (alert_id,)).fetchone()
+        if expect("Disposition persisted in DB", row["disposition_status"] == "follow_up" and row["disposition_handler"] == "manager",
+                  f"status={row['disposition_status']} handler={row['disposition_handler']}"): passed += 1
+        else: failed += 1
+        con.close()
+
+        server = start_server()
+        time.sleep(0.5)
+        man4 = Session()
+        man4.post("/api/login", {"username":"manager","password":"manager123"})
+
+        s, d = man4.get(f"/api/vouchers/{vid_disp}")
+        alerts_after = d.get("alerts", [])
+        if expect("After restart disposition still present", len(alerts_after) > 0, f"alerts={len(alerts_after)}"): passed += 1
+        else: failed += 1
+        disp_after = alerts_after[0]
+        if expect("After restart status=follow_up", disp_after["disposition_status"] == "follow_up",
+                  f"status={disp_after['disposition_status']}"): passed += 1
+        else: failed += 1
+        if expect("After restart handler=manager", disp_after["disposition_handler"] == "manager",
+                  f"handler={disp_after['disposition_handler']}"): passed += 1
+        else: failed += 1
+        if expect("After restart note preserved", "转财务核实" in (disp_after["disposition_note"] or ""),
+                  f"note={disp_after['disposition_note']}"): passed += 1
+        else: failed += 1
+
+        print("\n--- Test 26: Disposition Filtering ---")
+        s, d = man4.get("/api/alert-logs?disposition_status=unprocessed")
+        unprocessed = [l for l in d.get("logs", []) if l["voucher_no"] == "T-DISP-001"]
+        if expect("Filter unprocessed returns 0 for our voucher", len(unprocessed) == 0,
+                  f"count={len(unprocessed)}"): passed += 1
+        else: failed += 1
+
+        s, d = man4.get("/api/alert-logs?disposition_status=follow_up")
+        follow_up = [l for l in d.get("logs", []) if l["id"] == alert_id]
+        if expect("Filter follow_up returns our alert", len(follow_up) == 1,
+                  f"count={len(follow_up)}"): passed += 1
+        else: failed += 1
+
+        s, d = man4.get("/api/vouchers?alert_disposition=follow_up")
+        vouchers = [v for v in d.get("vouchers", []) if v["voucher_no"] == "T-DISP-001"]
+        if expect("Voucher filter by alert_disposition=follow_up works", len(vouchers) == 1,
+                  f"count={len(vouchers)}"): passed += 1
+        else: failed += 1
+
+        s, d = man4.get("/api/vouchers?alert_disposition=unprocessed")
+        vouchers2 = [v for v in d.get("vouchers", []) if v["voucher_no"] == "T-DISP-001"]
+        if expect("Voucher filter by alert_disposition=unprocessed excludes our voucher", len(vouchers2) == 0,
+                  f"count={len(vouchers2)}"): passed += 1
+        else: failed += 1
+
+        print("\n--- Test 27: CSV Export Includes Disposition Fields ---")
+        url = BASE_URL + "/api/vouchers/export.csv"
+        req = urllib.request.Request(url)
+        cookie_header = man4._cookie_header()
+        if cookie_header:
+            req.add_header("Cookie", cookie_header)
+        with urllib.request.urlopen(req) as resp:
+            csv_content = resp.read().decode("utf-8")
+        lines = csv_content.splitlines()
+        header = lines[0]
+        if expect("CSV header has disposition fields",
+                  all(k in header for k in ["处置状态","处置备注","处理人","处理时间"]),
+                  f"header={header}"): passed += 1
+        else: failed += 1
+
+        has_disp_row = any("T-DISP-001" in line and "需跟进" in line and "manager" in line for line in lines)
+        if expect("CSV data includes disposition values", has_disp_row,
+                  f"found_disp={has_disp_row}"): passed += 1
+        else: failed += 1
+
+        print("\n--- Test 28: Revoked/New Voucher Alert Isolation ---")
+        s, d = cash2.post("/api/vouchers", {
+            "voucher_no":"T-REV-DISP-001",
+            "shift_code":"中班",
+            "shift_date":"2026-06-12",
+            "cashier":"测试员",
+            "diff_amount": 200.00,
+            "reason":"系统差异",
+            "remark":"测试撤销后预警隔离",
+        })
+        vid_rev = d.get("id")
+        cash2.post(f"/api/vouchers/{vid_rev}/submit", {"remark":"提交"})
+        man4.post(f"/api/vouchers/{vid_rev}/review", {"action":"approve"})
+
+        s, d = man4.get(f"/api/vouchers/{vid_rev}")
+        old_alerts = d.get("alerts", [])
+        old_alert_id = old_alerts[0]["id"] if old_alerts else None
+        if expect("Original voucher has alerts", old_alert_id is not None): passed += 1
+        else: failed += 1
+
+        s, d = man4.post(f"/api/alert-logs/{old_alert_id}/disposition", {
+            "disposition_status": "confirmed",
+            "disposition_note": "原单已确认处理",
+            "disposition_version": old_alerts[0]["disposition_version"]
+        })
+        if expect("Original alert disposition set", s == 200): passed += 1
+        else: failed += 1
+
+        s, d = man4.post(f"/api/vouchers/{vid_rev}/revoke", {"reason":"原金额有误需更正"})
+        new_vid = d.get("new_id")
+        new_no = d.get("new_voucher_no")
+        if expect("Revoke successful", s == 200 and new_vid and new_no): passed += 1
+        else: failed += 1
+
+        s, d = cash2.post(f"/api/vouchers/{new_vid}/submit", {"diff_amount":250.00,"remark":"更正后金额250元"})
+
+        s, d = man4.get(f"/api/vouchers/{new_vid}")
+        new_alerts = d.get("alerts", [])
+        if expect("New voucher has its own alerts", len(new_alerts) > 0, f"new_alerts={len(new_alerts)}"): passed += 1
+        else: failed += 1
+
+        new_alert_ids = [a["id"] for a in new_alerts]
+        if expect("New alert IDs different from old", old_alert_id not in new_alert_ids,
+                  f"old_id={old_alert_id} new_ids={new_alert_ids}"): passed += 1
+        else: failed += 1
+
+        for na in new_alerts:
+            if expect("New alerts start as unprocessed", na["disposition_status"] == "unprocessed",
+                      f"status={na['disposition_status']}"): passed += 1
+            else: failed += 1
+            if expect("New alerts have no handler", na.get("disposition_handler") is None,
+                      f"handler={na.get('disposition_handler')}"): passed += 1
+            else: failed += 1
+
+        s, d = man4.get(f"/api/vouchers/{vid_rev}")
+        old_alerts_after = d.get("alerts", [])
+        old_disp = old_alerts_after[0] if old_alerts_after else None
+        if expect("Original voucher disposition unchanged after revoke",
+                  old_disp and old_disp["disposition_status"] == "confirmed",
+                  f"status={old_disp['disposition_status'] if old_disp else 'N/A'}"): passed += 1
+        else: failed += 1
+
+        print("\n--- Test 29: Cashier Sees Disposition Results But Cannot Edit ---")
+        s, d = cash2.get(f"/api/vouchers/{vid_disp}")
+        alerts_cashier = d.get("alerts", [])
+        if expect("Cashier can see disposition status", len(alerts_cashier) > 0 and alerts_cashier[0]["disposition_status"] == "follow_up",
+                  f"status={alerts_cashier[0]['disposition_status'] if alerts_cashier else 'N/A'}"): passed += 1
+        else: failed += 1
+        if expect("Cashier can see disposition handler", alerts_cashier[0].get("disposition_handler") == "manager",
+                  f"handler={alerts_cashier[0].get('disposition_handler')}"): passed += 1
+        else: failed += 1
+        if expect("Cashier can see disposition note", "转财务核实" in (alerts_cashier[0].get("disposition_note") or ""),
+                  f"note={alerts_cashier[0].get('disposition_note')}"): passed += 1
+        else: failed += 1
+
+        s, d = cash2.get("/api/alert-logs")
+        logs_cashier = d.get("logs", [])
+        disp_logs = [l for l in logs_cashier if l["id"] == alert_id]
+        if expect("Cashier can see disposition in alert logs", len(disp_logs) > 0 and disp_logs[0]["disposition_status"] == "follow_up",
+                  f"status={disp_logs[0]['disposition_status'] if disp_logs else 'N/A'}"): passed += 1
+        else: failed += 1
+
+        s, d = cash2.get("/api/alert-rules")
+        if assert_eq("Cashier still cannot see alert rules config (403)", s, 403): passed += 1
+        else: failed += 1
+
+        print("\n--- Test 30: Default disposition status is unprocessed ---")
+        s, d = cash2.post("/api/vouchers", {
+            "voucher_no":"T-DISP-DEFAULT",
+            "shift_code":"晚班",
+            "shift_date":"2026-06-12",
+            "cashier":"测试员",
+            "diff_amount": 150.00,
+            "reason":"系统差异",
+            "remark":"测试默认处置状态",
+        })
+        vid_default = d.get("id")
+        s, d = cash2.get(f"/api/vouchers/{vid_default}")
+        default_alerts = d.get("alerts", [])
+        if expect("New alerts default to unprocessed",
+                  len(default_alerts) > 0 and all(a["disposition_status"] == "unprocessed" for a in default_alerts),
+                  f"statuses={[a['disposition_status'] for a in default_alerts]}"): passed += 1
+        else: failed += 1
+        if expect("New alerts have version 0",
+                  all(a["disposition_version"] == 0 for a in default_alerts),
+                  f"versions={[a['disposition_version'] for a in default_alerts]}"): passed += 1
+        else: failed += 1
+
         print("\n" + "=" * 70)
         total = passed + failed
         print(f" COMPLETED: Total={total}  Passed={passed}  Failed={failed}")

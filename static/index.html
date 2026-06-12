@@ -58,6 +58,10 @@ tbody tr:hover{background:#f9fafb}
 .status-returned{background:#fee2e2;color:#991b1b}
 .status-closed{background:#d1fae5;color:#065f46}
 .status-revoked{background:#e9d5ff;color:#6b21a8}
+.disp-unprocessed{background:#fee2e2;color:#991b1b}
+.disp-confirmed{background:#d1fae5;color:#065f46}
+.disp-follow_up{background:#fef3c7;color:#92400e}
+.disp-ignored{background:#e5e7eb;color:#6b7280}
 .amount{font-weight:600;font-family:"Consolas",monospace}
 .amount.neg{color:#dc2626}
 .amount.pos{color:#059669}
@@ -164,6 +168,16 @@ tbody tr:hover{background:#f9fafb}
           <input id="filterKeyword" placeholder="单号/收银员/备注">
         </div>
         <div class="form-group">
+          <label>预警处置</label>
+          <select id="filterAlertDisp">
+            <option value="">全部</option>
+            <option value="unprocessed">未处理</option>
+            <option value="confirmed">已确认</option>
+            <option value="follow_up">需跟进</option>
+            <option value="ignored">已忽略</option>
+          </select>
+        </div>
+        <div class="form-group">
           <button class="btn btn-gray btn-sm" onclick="loadVouchers()">查询</button>
         </div>
         <div class="spacer"></div>
@@ -188,6 +202,7 @@ tbody tr:hover{background:#f9fafb}
               <th>原因</th>
               <th>状态</th>
               <th>预警</th>
+              <th>处置状态</th>
               <th>创建人</th>
               <th>操作时间</th>
               <th>操作</th>
@@ -212,10 +227,22 @@ tbody tr:hover{background:#f9fafb}
       {% endif %}
       <div class="panel-section">
         <h3>🔔 预警记录</h3>
+        <div class="toolbar" style="margin-bottom:12px;padding:12px">
+          <div class="form-group" style="margin:0;min-width:160px">
+            <label>处置状态</label>
+            <select id="filterAlertLogDisp" onchange="loadAlertPanel()">
+              <option value="">全部</option>
+              <option value="unprocessed">未处理</option>
+              <option value="confirmed">已确认</option>
+              <option value="follow_up">需跟进</option>
+              <option value="ignored">已忽略</option>
+            </select>
+          </div>
+        </div>
         <div class="table-wrap">
           <table class="log-table">
             <thead>
-              <tr><th>时间</th><th>单据编号</th><th>规则名称</th><th>规则类型</th><th>预警原因</th></tr>
+              <tr><th>时间</th><th>单据编号</th><th>规则名称</th><th>预警原因</th><th>处置状态</th><th>处置人</th><th>处置时间</th><th>操作</th></tr>
             </thead>
             <tbody id="alertLogList"></tbody>
           </table>
@@ -358,6 +385,36 @@ tbody tr:hover{background:#f9fafb}
 </div>
 
 {% if user.role in ['admin','manager'] %}
+<div class="modal-mask" id="dispositionModal">
+  <div class="modal">
+    <div class="modal-header">
+      <h2>预警处置</h2>
+      <button class="close-x" onclick="closeModal('dispositionModal')">×</button>
+    </div>
+    <div class="modal-body">
+      <div id="dispositionAlert"></div>
+      <div id="dispositionAlertInfo" class="alert-box" style="margin-bottom:16px"></div>
+      <div class="form-group">
+        <label>处置状态 <span style="color:#ef4444">*</span></label>
+        <select id="dispStatus">
+          <option value="unprocessed">未处理</option>
+          <option value="confirmed">已确认</option>
+          <option value="follow_up">需跟进</option>
+          <option value="ignored">已忽略</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label>处置备注</label>
+        <textarea id="dispNote" placeholder="请填写处置说明、跟进计划等..."></textarea>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-gray" onclick="closeModal('dispositionModal')">取消</button>
+      <button class="btn btn-primary" onclick="saveDisposition()">保存处置</button>
+    </div>
+  </div>
+</div>
+
 <div class="modal-mask" id="ruleModal">
   <div class="modal">
     <div class="modal-header">
@@ -436,6 +493,14 @@ const RULE_TYPE_TEXT = {
   cumulative_amount:'同一收银员当天累计差异阈值',
   consecutive_return:'连续退回次数'
 };
+const DISP_STATUS_TEXT = {
+  unprocessed:'未处理',
+  confirmed:'已确认',
+  follow_up:'需跟进',
+  ignored:'已忽略'
+};
+let tempDispositionAlertId = null;
+let tempDispositionVersion = null;
 let editingId = null;
 let currentVoucher = null;
 let tempReviewVid = null;
@@ -497,7 +562,7 @@ async function init() {
   });
   document.getElementById('fDate').valueAsDate = new Date();
   renderList(v.data.vouchers);
-  ['filterShift','filterHandler','filterStatus','filterKeyword'].forEach(id=>{
+  ['filterShift','filterHandler','filterStatus','filterKeyword','filterAlertDisp'].forEach(id=>{
     document.getElementById(id).addEventListener('change', loadVouchers);
     document.getElementById(id).addEventListener('keypress', e=>{if(e.key==='Enter')loadVouchers()});
   });
@@ -518,6 +583,12 @@ function renderSummary(d){
     cell('closed','已关闭', '', '处理完成的单据') +
     cell('returned','已退回', 'red', '收银员需补充后重提') +
     cell('revoked','已撤销', '', '撤销保留历史');
+}
+
+function renderDispBadge(status){
+  if(!status) return '<span style="color:#d1d5db">—</span>';
+  const label = DISP_STATUS_TEXT[status] || status;
+  return `<span class="status disp-${status}" title="${label}">${label}</span>`;
 }
 
 function renderAlertTag(warnings){
@@ -542,6 +613,7 @@ function renderList(list){
       <td style="max-width:180px;overflow:hidden;text-overflow:ellipsis" title="${v.reason||''}">${v.reason||'<span style="color:#d1d5db">—</span>'}</td>
       <td><span class="status status-${v.status}">${STATUS_TEXT[v.status]||v.status}</span></td>
       <td>${renderAlertTag(v.warning_reasons)}</td>
+      <td>${renderDispBadge(v.alert_disp_summary)}</td>
       <td>${v.created_by}</td>
       <td style="font-size:12px;color:#9ca3af">${v.updated_at}</td>
       <td class="actions">${act}</td>
@@ -577,7 +649,8 @@ async function loadVouchers(){
     shift_code: document.getElementById('filterShift').value,
     handler: document.getElementById('filterHandler').value,
     status: document.getElementById('filterStatus').value,
-    keyword: document.getElementById('filterKeyword').value
+    keyword: document.getElementById('filterKeyword').value,
+    alert_disposition: document.getElementById('filterAlertDisp').value
   }).toString();
   const r = await api('/api/vouchers?'+params);
   if(r.ok) renderList(r.data.vouchers);
@@ -691,11 +764,23 @@ async function openDetail(vid){
   const amtCls = v.diff_amount<0?'neg':'pos';
   const alerts = r.data.alerts || [];
 
+  const isMgr = ['admin','manager'].includes(ROLE);
   let alertBoxHtml = '';
   if(alerts.length>0){
     alertBoxHtml = `<div class="alert-box"><strong>⚠ 异常预警 (${alerts.length}条)</strong>`;
     alerts.forEach(a=>{
-      alertBoxHtml += `<div class="alert-item"><strong>${a.rule_name}</strong> [${RULE_TYPE_TEXT[a.rule_type]||a.rule_type}]：${a.alert_reason}</div>`;
+      alertBoxHtml += `<div class="alert-item">
+        <div style="margin-bottom:4px">
+          <strong>${a.rule_name}</strong> [${RULE_TYPE_TEXT[a.rule_type]||a.rule_type}]：${a.alert_reason}
+        </div>
+        <div style="font-size:12px;color:#6b7280;padding-left:12px">
+          处置：${renderDispBadge(a.disposition_status)}
+          ${a.disposition_note?` <span style="margin-left:8px">备注：${a.disposition_note}</span>`:''}
+          ${a.disposition_handler?` <span style="margin-left:8px">处理人：${a.disposition_handler}</span>`:''}
+          ${a.disposition_time?` <span style="margin-left:8px">@ ${a.disposition_time}</span>`:''}
+          ${isMgr?` <button class="btn btn-sm btn-outline" style="margin-left:8px;padding:2px 8px;font-size:11px" onclick="openDisposition(${a.id},${a.disposition_version})">处置</button>`:''}
+        </div>
+      </div>`;
     });
     alertBoxHtml += '</div>';
   }
@@ -851,7 +936,8 @@ async function importCSV(input){
 // ---------- Alert Rules ---------- //
 
 async function loadAlertPanel(){
-  const reqs = [api('/api/alert-logs')];
+  const dispFilter = document.getElementById('filterAlertLogDisp')?.value || '';
+  const reqs = [api('/api/alert-logs?disposition_status='+encodeURIComponent(dispFilter))];
   const isMgr = ['admin','manager'].includes(ROLE);
   if(isMgr) reqs.unshift(api('/api/alert-rules'));
   const results = await Promise.all(reqs);
@@ -890,8 +976,9 @@ function renderRuleList(rules){
 
 function renderAlertLogs(logs){
   const el = document.getElementById('alertLogList');
+  const isMgr = ['admin','manager'].includes(ROLE);
   if(!logs.length){
-    el.innerHTML = '<tr><td colspan="5" style="text-align:center;color:#9ca3af;padding:20px">暂无预警记录</td></tr>';
+    el.innerHTML = `<tr><td colspan="${isMgr?8:7}" style="text-align:center;color:#9ca3af;padding:20px">暂无预警记录</td></tr>`;
     return;
   }
   el.innerHTML = logs.map(l=>`
@@ -899,10 +986,75 @@ function renderAlertLogs(logs){
       <td>${l.created_at}</td>
       <td style="cursor:pointer;color:#2563eb" onclick="switchTab('vouchers')">${l.voucher_no}</td>
       <td>${l.rule_name}</td>
-      <td>${RULE_TYPE_TEXT[l.rule_type]||l.rule_type}</td>
-      <td>${l.alert_reason}</td>
+      <td style="max-width:200px;overflow:hidden;text-overflow:ellipsis" title="${l.alert_reason}">${l.alert_reason}</td>
+      <td>${renderDispBadge(l.disposition_status)}</td>
+      <td>${l.disposition_handler||'—'}</td>
+      <td>${l.disposition_time||'—'}</td>
+      ${isMgr?`<td><button class="btn btn-sm btn-outline" onclick="openDisposition(${l.id},${l.disposition_version})">处置</button></td>`:''}
     </tr>
   `).join('');
+}
+
+function openDisposition(alertId, version){
+  tempDispositionAlertId = alertId;
+  tempDispositionVersion = version;
+  document.getElementById('dispositionAlert').classList.add('hidden');
+
+  api('/api/alert-logs').then(r=>{
+    if(!r.ok) return;
+    const alert = r.data.logs.find(l=>l.id===alertId);
+    if(alert){
+      document.getElementById('dispositionAlertInfo').innerHTML = `
+        <div class="alert-item"><strong>${alert.rule_name}</strong>：${alert.alert_reason}</div>
+        ${alert.disposition_status!=='unprocessed'?`
+        <div class="alert-item" style="font-size:12px;color:#6b7280">
+          当前处置：${renderDispBadge(alert.disposition_status)}
+          ${alert.disposition_note?` <span style="margin-left:8px">备注：${alert.disposition_note}</span>`:''}
+          ${alert.disposition_handler?` <span style="margin-left:8px">处理人：${alert.disposition_handler}</span>`:''}
+          ${alert.disposition_time?` <span style="margin-left:8px">@ ${alert.disposition_time}</span>`:''}
+        </div>`:''}
+      `;
+      document.getElementById('dispStatus').value = alert.disposition_status;
+      document.getElementById('dispNote').value = alert.disposition_note || '';
+      tempDispositionVersion = alert.disposition_version;
+    }
+  });
+
+  openModal('dispositionModal');
+}
+
+async function saveDisposition(){
+  const status = document.getElementById('dispStatus').value;
+  const note = document.getElementById('dispNote').value.trim();
+  const r = await api(`/api/alert-logs/${tempDispositionAlertId}/disposition`, {
+    method:'POST',
+    body:{
+      disposition_status: status,
+      disposition_note: note,
+      disposition_version: tempDispositionVersion
+    }
+  });
+  if(!r.ok){
+    if(r.status===409 && r.data?.current){
+      const cur = r.data.current;
+      showAlert('dispositionAlert', r.error + ` 当前状态：${DISP_STATUS_TEXT[cur.disposition_status]||cur.disposition_status}，处理人：${cur.disposition_handler||'无'}`, 'danger');
+      tempDispositionVersion = cur.disposition_version;
+      document.getElementById('dispStatus').value = cur.disposition_status;
+      document.getElementById('dispNote').value = cur.disposition_note || '';
+      return;
+    }
+    showAlert('dispositionAlert', r.error, 'danger');
+    return;
+  }
+  closeModal('dispositionModal');
+  alert('处置已保存');
+  loadVouchers();
+  if(!document.getElementById('tabAlertPanel').classList.contains('hidden')){
+    loadAlertPanel();
+  }
+  if(currentVoucher){
+    openDetail(currentVoucher.id);
+  }
 }
 
 function openCreateRule(){

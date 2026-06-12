@@ -28,6 +28,18 @@ STATUS_RETURNED = "returned"
 STATUS_CLOSED = "closed"
 STATUS_REVOKED = "revoked"
 
+DISP_UNPROCESSED = "unprocessed"
+DISP_CONFIRMED = "confirmed"
+DISP_FOLLOW_UP = "follow_up"
+DISP_IGNORED = "ignored"
+
+DISP_STATUS_LABELS = {
+    DISP_UNPROCESSED: "未处理",
+    DISP_CONFIRMED: "已确认",
+    DISP_FOLLOW_UP: "需跟进",
+    DISP_IGNORED: "已忽略",
+}
+
 DEFAULT_USERS = [
     {"username": "admin",   "password": "admin123",  "role": ROLE_ADMIN,   "display_name": "系统管理员"},
     {"username": "manager", "password": "manager123","role": ROLE_MANAGER, "display_name": "值班长"},
@@ -152,10 +164,16 @@ def init_db():
         rule_name TEXT NOT NULL,
         rule_type TEXT NOT NULL,
         alert_reason TEXT NOT NULL,
-        created_at TEXT DEFAULT (datetime('now','localtime'))
+        created_at TEXT DEFAULT (datetime('now','localtime')),
+        disposition_status TEXT NOT NULL DEFAULT 'unprocessed',
+        disposition_note TEXT,
+        disposition_handler TEXT,
+        disposition_time TEXT,
+        disposition_version INTEGER NOT NULL DEFAULT 0
     );
     CREATE INDEX IF NOT EXISTS idx_alert_logs_voucher ON alert_logs(voucher_no);
     CREATE INDEX IF NOT EXISTS idx_alert_logs_rule ON alert_logs(rule_id);
+    CREATE INDEX IF NOT EXISTS idx_alert_logs_disp ON alert_logs(disposition_status);
 
     CREATE TABLE IF NOT EXISTS operation_log (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -167,6 +185,21 @@ def init_db():
     );
     CREATE INDEX IF NOT EXISTS idx_oplog_action ON operation_log(action);
     """)
+
+    cur.execute("PRAGMA table_info(alert_logs)")
+    existing_cols = {row[1] for row in cur.fetchall()}
+    migration_cols = [
+        ("disposition_status", "TEXT NOT NULL DEFAULT 'unprocessed'"),
+        ("disposition_note", "TEXT"),
+        ("disposition_handler", "TEXT"),
+        ("disposition_time", "TEXT"),
+        ("disposition_version", "INTEGER NOT NULL DEFAULT 0"),
+    ]
+    for col_name, col_def in migration_cols:
+        if col_name not in existing_cols:
+            cur.execute(f"ALTER TABLE alert_logs ADD COLUMN {col_name} {col_def}")
+    if "disposition_status" in existing_cols:
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_alert_logs_disp ON alert_logs(disposition_status)")
 
     for u in DEFAULT_USERS:
         cur.execute("""
@@ -369,6 +402,7 @@ def api_list_vouchers():
     handler = request.args.get("handler") or ""
     status = request.args.get("status") or ""
     keyword = (request.args.get("keyword") or "").strip()
+    alert_disp = request.args.get("alert_disposition") or ""
 
     sql = "SELECT * FROM vouchers WHERE 1=1"
     params = []
@@ -396,19 +430,50 @@ def api_list_vouchers():
     if result:
         vnos = [v["voucher_no"] for v in result]
         placeholders = ",".join("?" * len(vnos))
-        alert_rows = db.execute(f"""
-            SELECT voucher_no, rule_name, rule_type, alert_reason
+        alert_sql = f"""
+            SELECT id, voucher_no, rule_name, rule_type, alert_reason, created_at,
+                   disposition_status, disposition_note, disposition_handler,
+                   disposition_time, disposition_version
             FROM alert_logs WHERE voucher_no IN ({placeholders})
-        """, vnos).fetchall()
+        """
+        alert_params = list(vnos)
+        if alert_disp:
+            alert_sql += " AND disposition_status = ?"
+            alert_params.append(alert_disp)
+        alert_rows = db.execute(alert_sql, alert_params).fetchall()
         for ar in alert_rows:
             alert_map.setdefault(ar["voucher_no"], []).append({
+                "id": ar["id"],
                 "rule_name": ar["rule_name"],
                 "rule_type": ar["rule_type"],
-                "reason": ar["alert_reason"]
+                "reason": ar["alert_reason"],
+                "created_at": ar["created_at"],
+                "disposition_status": ar["disposition_status"],
+                "disposition_note": ar["disposition_note"],
+                "disposition_handler": ar["disposition_handler"],
+                "disposition_time": ar["disposition_time"],
+                "disposition_version": ar["disposition_version"],
             })
 
+    filtered_result = []
     for v in result:
-        v["warning_reasons"] = alert_map.get(v["voucher_no"], [])
+        alerts = alert_map.get(v["voucher_no"], [])
+        if alert_disp and not alerts:
+            continue
+        v["warning_reasons"] = alerts
+        if alerts:
+            disp_statuses = [a["disposition_status"] for a in alerts]
+            if DISP_UNPROCESSED in disp_statuses:
+                v["alert_disp_summary"] = DISP_UNPROCESSED
+            elif DISP_FOLLOW_UP in disp_statuses:
+                v["alert_disp_summary"] = DISP_FOLLOW_UP
+            elif DISP_CONFIRMED in disp_statuses:
+                v["alert_disp_summary"] = DISP_CONFIRMED
+            else:
+                v["alert_disp_summary"] = DISP_IGNORED
+        else:
+            v["alert_disp_summary"] = None
+        filtered_result.append(v)
 
     handler_rows = db.execute("""
         SELECT DISTINCT username, display_name FROM users
@@ -417,7 +482,7 @@ def api_list_vouchers():
     """).fetchall()
 
     return jsonify({
-        "vouchers": result,
+        "vouchers": filtered_result,
         "handlers": [row_to_dict(r) for r in handler_rows]
     })
 
@@ -693,27 +758,79 @@ def api_export_csv():
     db = get_db()
     rows = db.execute("SELECT * FROM vouchers ORDER BY id DESC").fetchall()
 
+    vnos = [r["voucher_no"] for r in rows] if rows else []
+    alert_map = {}
+    if vnos:
+        placeholders = ",".join("?" * len(vnos))
+        alert_rows = db.execute(f"""
+            SELECT voucher_no, rule_name, alert_reason, disposition_status,
+                   disposition_note, disposition_handler, disposition_time
+            FROM alert_logs WHERE voucher_no IN ({placeholders})
+            ORDER BY id ASC
+        """, vnos).fetchall()
+        for ar in alert_rows:
+            alert_map.setdefault(ar["voucher_no"], []).append({
+                "rule_name": ar["rule_name"],
+                "alert_reason": ar["alert_reason"],
+                "disposition_status": ar["disposition_status"],
+                "disposition_note": ar["disposition_note"],
+                "disposition_handler": ar["disposition_handler"],
+                "disposition_time": ar["disposition_time"],
+            })
+
     buf = io.StringIO()
     buf.write("\ufeff")
     writer = csv.writer(buf)
     writer.writerow([
         "单据编号", "状态", "班次", "班次日期", "收银员", "差异金额",
         "原因", "备注", "创建人", "创建时间", "复核人", "关闭人",
-        "退回说明", "关闭说明", "撤销人", "撤销时间", "关联原单", "导入来源"
+        "退回说明", "关闭说明", "撤销人", "撤销时间", "关联原单", "导入来源",
+        "预警规则", "预警原因", "处置状态", "处置备注", "处理人", "处理时间"
     ])
     status_text = {
         STATUS_DRAFT: "草稿", STATUS_PENDING: "待复核", STATUS_REVIEWED: "复核通过",
         STATUS_RETURNED: "已退回", STATUS_CLOSED: "已关闭", STATUS_REVOKED: "已撤销"
     }
     for r in rows:
-        writer.writerow([
-            r["voucher_no"], status_text.get(r["status"], r["status"]),
-            r["shift_code"], r["shift_date"], r["cashier"], r["diff_amount"],
-            r["reason"] or "", r["remark"] or "", r["created_by"],
-            r["created_at"], r["reviewed_by"] or "", r["closed_by"] or "",
-            r["return_note"] or "", r["closed_note"] or "", r["revoked_by"] or "",
-            r["revoked_at"] or "", r["parent_voucher_no"] or "", r["import_source"] or ""
-        ])
+        alerts = alert_map.get(r["voucher_no"], [])
+        if not alerts:
+            writer.writerow([
+                r["voucher_no"], status_text.get(r["status"], r["status"]),
+                r["shift_code"], r["shift_date"], r["cashier"], r["diff_amount"],
+                r["reason"] or "", r["remark"] or "", r["created_by"],
+                r["created_at"], r["reviewed_by"] or "", r["closed_by"] or "",
+                r["return_note"] or "", r["closed_note"] or "", r["revoked_by"] or "",
+                r["revoked_at"] or "", r["parent_voucher_no"] or "", r["import_source"] or "",
+                "", "", "", "", "", ""
+            ])
+        else:
+            for i, a in enumerate(alerts):
+                writer.writerow([
+                    r["voucher_no"] if i == 0 else "",
+                    status_text.get(r["status"], r["status"]) if i == 0 else "",
+                    r["shift_code"] if i == 0 else "",
+                    r["shift_date"] if i == 0 else "",
+                    r["cashier"] if i == 0 else "",
+                    r["diff_amount"] if i == 0 else "",
+                    r["reason"] or "" if i == 0 else "",
+                    r["remark"] or "" if i == 0 else "",
+                    r["created_by"] if i == 0 else "",
+                    r["created_at"] if i == 0 else "",
+                    r["reviewed_by"] or "" if i == 0 else "",
+                    r["closed_by"] or "" if i == 0 else "",
+                    r["return_note"] or "" if i == 0 else "",
+                    r["closed_note"] or "" if i == 0 else "",
+                    r["revoked_by"] or "" if i == 0 else "",
+                    r["revoked_at"] or "" if i == 0 else "",
+                    r["parent_voucher_no"] or "" if i == 0 else "",
+                    r["import_source"] or "" if i == 0 else "",
+                    a["rule_name"],
+                    a["alert_reason"],
+                    DISP_STATUS_LABELS.get(a["disposition_status"], a["disposition_status"]),
+                    a["disposition_note"] or "",
+                    a["disposition_handler"] or "",
+                    a["disposition_time"] or ""
+                ])
     output = buf.getvalue().encode("utf-8")
     resp = make_response(output)
     resp.headers["Content-Type"] = "text/csv; charset=utf-8"
@@ -1172,17 +1289,71 @@ def api_import_alert_rules_csv():
 @login_required
 def api_list_alert_logs():
     voucher_no = request.args.get("voucher_no") or ""
+    disp_status = request.args.get("disposition_status") or ""
     db = get_db()
+    sql = "SELECT * FROM alert_logs WHERE 1=1"
+    params = []
     if voucher_no:
-        rows = db.execute(
-            "SELECT * FROM alert_logs WHERE voucher_no = ? ORDER BY id DESC",
-            (voucher_no,)
-        ).fetchall()
-    else:
-        rows = db.execute(
-            "SELECT * FROM alert_logs ORDER BY id DESC LIMIT 200"
-        ).fetchall()
+        sql += " AND voucher_no = ?"
+        params.append(voucher_no)
+    if disp_status:
+        sql += " AND disposition_status = ?"
+        params.append(disp_status)
+    sql += " ORDER BY id DESC LIMIT 200"
+    rows = db.execute(sql, params).fetchall()
     return jsonify({"logs": [row_to_dict(r) for r in rows]})
+
+
+@app.route("/api/alert-logs/<int:alert_id>/disposition", methods=["POST"])
+@role_required(ROLE_ADMIN, ROLE_MANAGER)
+def api_update_alert_disposition(alert_id):
+    data = request.get_json(force=True, silent=True) or {}
+    status = (data.get("disposition_status") or "").strip()
+    note = (data.get("disposition_note") or "").strip()
+    version = data.get("disposition_version")
+
+    if status not in (DISP_UNPROCESSED, DISP_CONFIRMED, DISP_FOLLOW_UP, DISP_IGNORED):
+        return jsonify({"error": f"无效的处置状态，可选：{','.join(DISP_STATUS_LABELS.keys())}"}), 400
+
+    user = current_user()
+    db = get_db()
+    cur = db.cursor()
+
+    cur.execute("SELECT * FROM alert_logs WHERE id = ?", (alert_id,))
+    alert = cur.fetchone()
+    if not alert:
+        return jsonify({"error": "预警记录不存在"}), 404
+
+    if version is not None and int(version) != int(alert["disposition_version"]):
+        return jsonify({
+            "error": "处置冲突：该预警已被其他用户处理过，请刷新后重新查看最新状态再提交",
+            "current": row_to_dict(alert)
+        }), 409
+
+    new_version = int(alert["disposition_version"]) + 1
+    cur.execute("""
+        UPDATE alert_logs
+        SET disposition_status = ?, disposition_note = ?, disposition_handler = ?,
+            disposition_time = datetime('now','localtime'), disposition_version = ?
+        WHERE id = ? AND disposition_version = ?
+    """, (status, note, user["username"], new_version, alert_id, alert["disposition_version"]))
+
+    if cur.rowcount == 0:
+        cur.execute("SELECT * FROM alert_logs WHERE id = ?", (alert_id,))
+        latest = cur.fetchone()
+        return jsonify({
+            "error": "处置冲突：该预警已被其他用户处理过，请刷新后重新查看最新状态再提交",
+            "current": row_to_dict(latest)
+        }), 409
+
+    add_operation_log(cur, "更新预警处置", user["username"], user["role"],
+                     f"预警ID={alert_id}, 状态={DISP_STATUS_LABELS.get(status, status)}, "
+                     f"单据={alert['voucher_no']}, 备注={note[:100] if note else '无'}")
+    db.commit()
+
+    cur.execute("SELECT * FROM alert_logs WHERE id = ?", (alert_id,))
+    updated = cur.fetchone()
+    return jsonify({"ok": True, "alert": row_to_dict(updated)})
 
 
 # ---------- Operation Logs ---------- #
