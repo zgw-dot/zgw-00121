@@ -238,11 +238,21 @@ tbody tr:hover{background:#f9fafb}
               <option value="ignored">已忽略</option>
             </select>
           </div>
+          {% if user.role in ['admin','manager'] %}
+          <div class="spacer"></div>
+          <span id="batchSelectInfo" style="font-size:13px;color:#6b7280;margin-right:8px">未选择</span>
+          <button class="btn btn-primary btn-sm" id="batchDispositionBtn" onclick="openBatchDisposition()" disabled>批量处置</button>
+          {% endif %}
         </div>
         <div class="table-wrap">
           <table class="log-table">
             <thead>
-              <tr><th>时间</th><th>单据编号</th><th>规则名称</th><th>预警原因</th><th>处置状态</th><th>处置人</th><th>处置时间</th><th>操作</th></tr>
+              <tr>
+                {% if user.role in ['admin','manager'] %}
+                <th style="width:36px"><input type="checkbox" id="selectAllAlerts" onchange="toggleSelectAllAlerts(this)"></th>
+                {% endif %}
+                <th>时间</th><th>单据编号</th><th>规则名称</th><th>预警原因</th><th>处置状态</th><th>处置人</th><th>处置时间</th><th>操作</th>
+              </tr>
             </thead>
             <tbody id="alertLogList"></tbody>
           </table>
@@ -415,6 +425,40 @@ tbody tr:hover{background:#f9fafb}
   </div>
 </div>
 
+<div class="modal-mask" id="batchDispositionModal">
+  <div class="modal">
+    <div class="modal-header">
+      <h2>批量预警处置</h2>
+      <button class="close-x" onclick="closeModal('batchDispositionModal')">×</button>
+    </div>
+    <div class="modal-body">
+      <div id="batchDispositionAlert"></div>
+      <div class="alert-box" id="batchDispositionSummary" style="margin-bottom:16px"></div>
+      <div class="form-group">
+        <label>处置状态 <span style="color:#ef4444">*</span></label>
+        <select id="batchDispStatus">
+          <option value="confirmed">已确认</option>
+          <option value="follow_up">需跟进</option>
+          <option value="ignored">已忽略</option>
+          <option value="unprocessed">未处理</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label>处置备注</label>
+        <textarea id="batchDispNote" placeholder="请填写统一的处置说明、跟进计划等..."></textarea>
+      </div>
+      <div id="batchDispositionResults" class="hidden">
+        <h4 style="font-size:14px;color:#111827;margin-bottom:12px;padding-bottom:8px;border-bottom:1px solid #e5e7eb">处置结果明细</h4>
+        <div id="batchDispositionResultsContent"></div>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-gray" onclick="closeModal('batchDispositionModal')">关闭</button>
+      <button class="btn btn-primary" id="batchDispSubmitBtn" onclick="saveBatchDisposition()">批量处置</button>
+    </div>
+  </div>
+</div>
+
 <div class="modal-mask" id="ruleModal">
   <div class="modal">
     <div class="modal-header">
@@ -508,6 +552,7 @@ let tempAction = null;
 let tempRevokeVid = null;
 let tempCloseVid = null;
 let editingRuleId = null;
+let selectedAlerts = new Map();
 
 async function api(url, opt={}) {
   const o = Object.assign({headers:{'Content-Type':'application/json'}, credentials:'same-origin'}, opt);
@@ -978,11 +1023,16 @@ function renderAlertLogs(logs){
   const el = document.getElementById('alertLogList');
   const isMgr = ['admin','manager'].includes(ROLE);
   if(!logs.length){
-    el.innerHTML = `<tr><td colspan="${isMgr?8:7}" style="text-align:center;color:#9ca3af;padding:20px">暂无预警记录</td></tr>`;
+    el.innerHTML = `<tr><td colspan="${isMgr?9:8}" style="text-align:center;color:#9ca3af;padding:20px">暂无预警记录</td></tr>`;
+    if(isMgr) updateBatchSelectInfo();
     return;
   }
-  el.innerHTML = logs.map(l=>`
+  el.innerHTML = logs.map(l=>{
+    const checked = selectedAlerts.has(l.id);
+    return `
     <tr>
+      ${isMgr?`<td><input type="checkbox" class="alert-checkbox" data-id="${l.id}" data-version="${l.disposition_version}"
+        onchange="toggleSelectAlert(${l.id}, ${l.disposition_version}, '${l.voucher_no.replace(/'/g,"\\'")}', '${l.rule_name.replace(/'/g,"\\'")}', this)" ${checked?'checked':''}></td>`:''}
       <td>${l.created_at}</td>
       <td style="cursor:pointer;color:#2563eb" onclick="switchTab('vouchers')">${l.voucher_no}</td>
       <td>${l.rule_name}</td>
@@ -991,8 +1041,53 @@ function renderAlertLogs(logs){
       <td>${l.disposition_handler||'—'}</td>
       <td>${l.disposition_time||'—'}</td>
       ${isMgr?`<td><button class="btn btn-sm btn-outline" onclick="openDisposition(${l.id},${l.disposition_version})">处置</button></td>`:''}
-    </tr>
-  `).join('');
+    </tr>`;
+  }).join('');
+  if(isMgr) updateBatchSelectInfo();
+}
+
+function toggleSelectAllAlerts(cb){
+  if(cb.checked){
+    document.querySelectorAll('.alert-checkbox').forEach(c=>{
+      const id = parseInt(c.dataset.id);
+      const ver = parseInt(c.dataset.version);
+      if(!selectedAlerts.has(id)){
+        selectedAlerts.set(id, {id, version: ver, voucher_no: c.closest('tr').querySelectorAll('td')[2]?.textContent || '', rule_name: ''});
+      }
+      c.checked = true;
+    });
+  } else {
+    selectedAlerts.clear();
+    document.querySelectorAll('.alert-checkbox').forEach(c=>c.checked = false);
+  }
+  updateBatchSelectInfo();
+}
+
+function toggleSelectAlert(id, version, voucher_no, rule_name, cb){
+  if(cb.checked){
+    selectedAlerts.set(id, {id, version, voucher_no, rule_name});
+  } else {
+    selectedAlerts.delete(id);
+  }
+  updateBatchSelectInfo();
+}
+
+function updateBatchSelectInfo(){
+  const info = document.getElementById('batchSelectInfo');
+  const btn = document.getElementById('batchDispositionBtn');
+  const selAll = document.getElementById('selectAllAlerts');
+  const count = selectedAlerts.size;
+  if(info){
+    info.textContent = count === 0 ? '未选择' : `已选择 ${count} 条`;
+  }
+  if(btn){
+    btn.disabled = count === 0;
+  }
+  if(selAll){
+    const checkboxes = document.querySelectorAll('.alert-checkbox');
+    selAll.checked = checkboxes.length > 0 && count === checkboxes.length;
+    selAll.indeterminate = count > 0 && count < checkboxes.length;
+  }
 }
 
 function openDisposition(alertId, version){
@@ -1048,6 +1143,100 @@ async function saveDisposition(){
   }
   closeModal('dispositionModal');
   alert('处置已保存');
+  loadVouchers();
+  if(!document.getElementById('tabAlertPanel').classList.contains('hidden')){
+    loadAlertPanel();
+  }
+  if(currentVoucher){
+    openDetail(currentVoucher.id);
+  }
+}
+
+function openBatchDisposition(){
+  if(selectedAlerts.size === 0){
+    alert('请先选择要处置的预警记录');
+    return;
+  }
+  document.getElementById('batchDispositionAlert').classList.add('hidden');
+  document.getElementById('batchDispositionResults').classList.add('hidden');
+  document.getElementById('batchDispStatus').value = 'confirmed';
+  document.getElementById('batchDispNote').value = '';
+  document.getElementById('batchDispSubmitBtn').style.display = '';
+  const items = Array.from(selectedAlerts.values());
+  const summaryHtml = `
+    <div class="alert-item"><strong>已选择 ${items.length} 条预警记录</strong></div>
+    ${items.slice(0,5).map(i=>`<div class="alert-item" style="font-size:12px;color:#6b7280">${i.voucher_no} - ${i.rule_name}</div>`).join('')}
+    ${items.length>5?`<div class="alert-item" style="font-size:12px;color:#9ca3af">...共 ${items.length} 条</div>`:''}
+  `;
+  document.getElementById('batchDispositionSummary').innerHTML = summaryHtml;
+  openModal('batchDispositionModal');
+}
+
+async function saveBatchDisposition(){
+  if(selectedAlerts.size === 0){
+    alert('请先选择要处置的预警记录');
+    return;
+  }
+  const status = document.getElementById('batchDispStatus').value;
+  const note = document.getElementById('batchDispNote').value.trim();
+  const items = Array.from(selectedAlerts.values()).map(a=>({id:a.id, disposition_version:a.version}));
+
+  const r = await api('/api/alert-logs/batch-disposition', {
+    method:'POST',
+    body:{
+      disposition_status: status,
+      disposition_note: note,
+      items: items
+    }
+  });
+
+  if(!r.ok){
+    showAlert('batchDispositionAlert', r.error, 'danger');
+    return;
+  }
+
+  document.getElementById('batchDispSubmitBtn').style.display = 'none';
+  const results = r.data.results;
+  const summary = r.data.summary;
+
+  let resultHtml = '';
+  if(summary.success > 0){
+    resultHtml += `<div style="margin-bottom:12px"><div style="font-weight:600;color:#065f46;margin-bottom:6px">✅ 成功 ${summary.success} 条</div>`;
+    resultHtml += `<div style="font-size:12px;color:#4b5563;max-height:120px;overflow-y:auto">`;
+    results.success.forEach(s=>{
+      resultHtml += `<div style="padding:3px 0">${s.voucher_no} - ${s.rule_name} → ${DISP_STATUS_TEXT[s.alert.disposition_status]||s.alert.disposition_status}</div>`;
+    });
+    resultHtml += `</div></div>`;
+    results.success.forEach(s=>selectedAlerts.delete(s.id));
+  }
+  if(summary.conflict > 0){
+    resultHtml += `<div style="margin-bottom:12px"><div style="font-weight:600;color:#b45309;margin-bottom:6px">⚠️ 冲突 ${summary.conflict} 条（已被其他用户处理，请刷新后重试）</div>`;
+    resultHtml += `<div style="font-size:12px;color:#4b5563;max-height:120px;overflow-y:auto">`;
+    results.conflict.forEach(c=>{
+      resultHtml += `<div style="padding:3px 0">${c.voucher_no} - ${c.rule_name}：当前状态 ${DISP_STATUS_TEXT[c.current.disposition_status]||c.current.disposition_status}，处理人 ${c.current.disposition_handler||'无'}</div>`;
+    });
+    resultHtml += `</div></div>`;
+    results.conflict.forEach(c=>selectedAlerts.delete(c.id));
+  }
+  if(summary.not_found > 0){
+    resultHtml += `<div style="margin-bottom:12px"><div style="font-weight:600;color:#991b1b;margin-bottom:6px">❌ 不存在 ${summary.not_found} 条</div>`;
+    resultHtml += `<div style="font-size:12px;color:#4b5563">`;
+    results.not_found.forEach(n=>{
+      resultHtml += `<div style="padding:3px 0">ID=${n.id}：${n.error}</div>`;
+    });
+    resultHtml += `</div></div>`;
+    results.not_found.forEach(n=>selectedAlerts.delete(n.id));
+  }
+
+  document.getElementById('batchDispositionResultsContent').innerHTML = resultHtml;
+  document.getElementById('batchDispositionResults').classList.remove('hidden');
+
+  if(summary.success > 0){
+    showAlert('batchDispositionAlert', `批量处置完成：成功 ${summary.success} 条，冲突 ${summary.conflict} 条，不存在 ${summary.not_found} 条`, summary.success>0 && summary.conflict===0 && summary.not_found===0 ? 'success':'warning');
+  } else {
+    showAlert('batchDispositionAlert', `批量处置未成功处理任何记录：冲突 ${summary.conflict} 条，不存在 ${summary.not_found} 条`, 'danger');
+  }
+
   loadVouchers();
   if(!document.getElementById('tabAlertPanel').classList.contains('hidden')){
     loadAlertPanel();

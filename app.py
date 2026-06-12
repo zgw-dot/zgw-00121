@@ -1358,6 +1358,104 @@ def api_update_alert_disposition(alert_id):
     return jsonify({"ok": True, "alert": row_to_dict(updated)})
 
 
+@app.route("/api/alert-logs/batch-disposition", methods=["POST"])
+@role_required(ROLE_ADMIN, ROLE_MANAGER)
+def api_batch_alert_disposition():
+    data = request.get_json(force=True, silent=True) or {}
+    items = data.get("items") or []
+    status = (data.get("disposition_status") or "").strip()
+    note = (data.get("disposition_note") or "").strip()
+
+    if status not in (DISP_UNPROCESSED, DISP_CONFIRMED, DISP_FOLLOW_UP, DISP_IGNORED):
+        return jsonify({"error": f"无效的处置状态，可选：{','.join(DISP_STATUS_LABELS.keys())}"}), 400
+
+    if not items:
+        return jsonify({"error": "未选择任何预警记录"}), 400
+
+    user = current_user()
+    db = get_db()
+    cur = db.cursor()
+
+    results = {
+        "success": [],
+        "conflict": [],
+        "not_found": [],
+        "no_permission": []
+    }
+
+    for item in items:
+        alert_id = item.get("id")
+        version = item.get("disposition_version")
+
+        if alert_id is None:
+            results["not_found"].append({"id": alert_id, "error": "缺少预警ID"})
+            continue
+
+        try:
+            alert_id = int(alert_id)
+        except (TypeError, ValueError):
+            results["not_found"].append({"id": alert_id, "error": "预警ID无效"})
+            continue
+
+        cur.execute("SELECT * FROM alert_logs WHERE id = ?", (alert_id,))
+        alert = cur.fetchone()
+        if not alert:
+            results["not_found"].append({"id": alert_id, "error": "预警记录不存在"})
+            continue
+
+        if version is not None and int(version) != int(alert["disposition_version"]):
+            results["conflict"].append({
+                "id": alert_id,
+                "voucher_no": alert["voucher_no"],
+                "rule_name": alert["rule_name"],
+                "error": "处置冲突：该预警已被其他用户处理过",
+                "current": row_to_dict(alert)
+            })
+            continue
+
+        new_version = int(alert["disposition_version"]) + 1
+        cur.execute("""
+            UPDATE alert_logs
+            SET disposition_status = ?, disposition_note = ?, disposition_handler = ?,
+                disposition_time = datetime('now','localtime'), disposition_version = ?
+            WHERE id = ? AND disposition_version = ?
+        """, (status, note, user["username"], new_version, alert_id, alert["disposition_version"]))
+
+        if cur.rowcount == 0:
+            cur.execute("SELECT * FROM alert_logs WHERE id = ?", (alert_id,))
+            latest = cur.fetchone()
+            results["conflict"].append({
+                "id": alert_id,
+                "voucher_no": alert["voucher_no"],
+                "rule_name": alert["rule_name"],
+                "error": "处置冲突：该预警已被其他用户处理过",
+                "current": row_to_dict(latest)
+            })
+            continue
+
+        cur.execute("SELECT * FROM alert_logs WHERE id = ?", (alert_id,))
+        updated = cur.fetchone()
+        results["success"].append({
+            "id": alert_id,
+            "voucher_no": alert["voucher_no"],
+            "rule_name": alert["rule_name"],
+            "alert": row_to_dict(updated)
+        })
+
+        add_operation_log(cur, "批量更新预警处置", user["username"], user["role"],
+                         f"预警ID={alert_id}, 状态={DISP_STATUS_LABELS.get(status, status)}, "
+                         f"单据={alert['voucher_no']}, 备注={note[:100] if note else '无'}")
+
+    db.commit()
+
+    summary = {k: len(v) for k, v in results.items()}
+    return jsonify({
+        "ok": True,
+        "summary": summary,
+        "results": results
+    })
+
+
 # ---------- Operation Logs ---------- #
 
 @app.route("/api/operation-logs", methods=["GET"])

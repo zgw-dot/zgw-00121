@@ -1220,6 +1220,326 @@ def run():
                   f"versions={[a['disposition_version'] for a in default_alerts]}"): passed += 1
         else: failed += 1
 
+        print("\n--- Test 31: Batch Disposition - Permission Denied for Cashier ---")
+        s, d = cash2.get(f"/api/vouchers/{vid_disp}")
+        batch_alerts = d.get("alerts", [])
+        batch_test_ids = [{"id": a["id"], "disposition_version": a["disposition_version"]} for a in batch_alerts]
+        s, d = cash2.post("/api/alert-logs/batch-disposition", {
+            "disposition_status": "confirmed",
+            "disposition_note": "收银员尝试批量处置",
+            "items": batch_test_ids
+        })
+        if assert_eq("Cashier cannot batch disposition (403)", s, 403): passed += 1
+        else: failed += 1
+
+        print("\n--- Test 32: Batch Disposition - Empty Items Validation ---")
+        s, d = man4.post("/api/alert-logs/batch-disposition", {
+            "disposition_status": "confirmed",
+            "disposition_note": "空列表",
+            "items": []
+        })
+        if assert_eq("Batch with empty items returns 400", s, 400): passed += 1
+        else: failed += 1
+
+        s, d = man4.post("/api/alert-logs/batch-disposition", {
+            "disposition_status": "invalid_status",
+            "disposition_note": "无效状态",
+            "items": batch_test_ids
+        })
+        if assert_eq("Batch with invalid status returns 400", s, 400): passed += 1
+        else: failed += 1
+
+        print("\n--- Test 33: Batch Disposition - Not Found and Success Mixed ---")
+        s, d = man4.get(f"/api/vouchers/{vid_disp}")
+        real_alerts = d.get("alerts", [])
+        real_alert_ids = [{"id": a["id"], "disposition_version": a["disposition_version"]} for a in real_alerts]
+        fake_ids = [{"id": 99999, "disposition_version": 0}, {"id": 99998, "disposition_version": 0}]
+        mixed_items = real_alert_ids + fake_ids
+
+        s, d = man4.post("/api/alert-logs/batch-disposition", {
+            "disposition_status": "confirmed",
+            "disposition_note": "批量处置：已核实确认",
+            "items": mixed_items
+        })
+        if expect("Batch disposition returns 200 with mixed results", s == 200 and d.get("ok"),
+                  f"status={s} ok={d.get('ok')}"): passed += 1
+        else: failed += 1
+
+        summary = d.get("summary", {})
+        results = d.get("results", {})
+        if expect("Summary has success count >= real alerts count",
+                  summary.get("success", 0) >= len(real_alerts),
+                  f"summary={summary} real={len(real_alerts)}"): passed += 1
+        else: failed += 1
+        if assert_eq("Summary has not_found=2", summary.get("not_found", 0), 2): passed += 1
+        else: failed += 1
+        if expect("Success results have updated disposition",
+                  len(results.get("success", [])) > 0 and
+                  all(r.get("alert", {}).get("disposition_status") == "confirmed" for r in results.get("success", [])),
+                  f"first_success={results.get('success', [{}])[0].get('alert', {}).get('disposition_status') if results.get('success') else 'N/A'}"): passed += 1
+        else: failed += 1
+        if expect("Success results have handler=manager",
+                  all(r.get("alert", {}).get("disposition_handler") == "manager" for r in results.get("success", [])),
+                  f"handlers={[r.get('alert',{}).get('disposition_handler') for r in results.get('success',[])]}"): passed += 1
+        else: failed += 1
+        if expect("Success results have version incremented",
+                  all(int(r.get("alert", {}).get("disposition_version", -1)) > 0 for r in results.get("success", [])),
+                  f"versions={[r.get('alert',{}).get('disposition_version') for r in results.get('success',[])]}"): passed += 1
+        else: failed += 1
+        if expect("Not found results have correct IDs",
+                  [r.get("id") for r in results.get("not_found", [])] == [99999, 99998],
+                  f"not_found_ids={[r.get('id') for r in results.get('not_found',[])]}"): passed += 1
+        else: failed += 1
+
+        print("\n--- Test 34: Batch Disposition - Conflict Detection (Partial Success) ---")
+        s, d = man4.get(f"/api/vouchers/{vid_disp}")
+        current_alerts = d.get("alerts", [])
+        stale_items = []
+        fresh_items = []
+        for a in current_alerts:
+            stale_items.append({"id": a["id"], "disposition_version": 0})
+            fresh_items.append({"id": a["id"], "disposition_version": a["disposition_version"]})
+
+        one_stale = [stale_items[0]]
+        if len(fresh_items) > 1:
+            one_stale.append(fresh_items[1])
+
+        s, d = man4.post("/api/alert-logs/batch-disposition", {
+            "disposition_status": "follow_up",
+            "disposition_note": "批量冲突测试",
+            "items": one_stale
+        })
+        if expect("Batch with stale version: conflict >= 1", s == 200,
+                  f"status={s}"): passed += 1
+        else: failed += 1
+        summary2 = d.get("summary", {})
+        results2 = d.get("results", {})
+        if expect("Stale item detected as conflict", summary2.get("conflict", 0) >= 1,
+                  f"summary2={summary2}"): passed += 1
+        else: failed += 1
+        if expect("Conflict result includes current state",
+                  len(results2.get("conflict", [])) > 0 and results2["conflict"][0].get("current") is not None,
+                  f"conflict0={results2.get('conflict',[{}])[0]}"): passed += 1
+        else: failed += 1
+        if expect("Conflict result includes voucher_no and rule_name",
+                  len(results2.get("conflict", [])) > 0 and
+                  results2["conflict"][0].get("voucher_no") and
+                  results2["conflict"][0].get("rule_name"),
+                  f"conflict0_keys={list(results2.get('conflict',[{}])[0].keys())}"): passed += 1
+        else: failed += 1
+
+        print("\n--- Test 35: Batch Disposition - State Sync in Voucher Detail, Alert List, Filters ---")
+        s, d = cash2.post("/api/vouchers", {
+            "voucher_no":"T-BATCH-SYNC",
+            "shift_code":"早班",
+            "shift_date":"2026-06-12",
+            "cashier":"测试员",
+            "diff_amount": 600.00,
+            "reason":"系统差异",
+            "remark":"批量处置状态同步测试",
+        })
+        vid_sync = d.get("id")
+        s, d = man4.get(f"/api/vouchers/{vid_sync}")
+        sync_alerts = d.get("alerts", [])
+        sync_items = [{"id": a["id"], "disposition_version": a["disposition_version"]} for a in sync_alerts]
+        if expect("Sync test voucher has alerts", len(sync_items) > 0,
+                  f"alerts={len(sync_items)}"): passed += 1
+        else: failed += 1
+
+        s, d = man4.post("/api/alert-logs/batch-disposition", {
+            "disposition_status": "ignored",
+            "disposition_note": "批量处置：确认误报，已忽略",
+            "items": sync_items
+        })
+        if assert_eq("Batch disposition for sync test all success",
+                     d.get("summary", {}).get("success", 0), len(sync_items)): passed += 1
+        else: failed += 1
+
+        s, d = man4.get(f"/api/vouchers/{vid_sync}")
+        detail_alerts = d.get("alerts", [])
+        if expect("Voucher detail shows updated disposition=ignored",
+                  len(detail_alerts) > 0 and all(a["disposition_status"] == "ignored" for a in detail_alerts),
+                  f"detail_statuses={[a['disposition_status'] for a in detail_alerts]}"): passed += 1
+        else: failed += 1
+        if expect("Voucher detail shows disposition_note",
+                  all("确认误报" in (a.get("disposition_note") or "") for a in detail_alerts),
+                  f"notes={[a.get('disposition_note') for a in detail_alerts]}"): passed += 1
+        else: failed += 1
+
+        s, d = man4.get("/api/alert-logs?disposition_status=ignored")
+        ignored_logs = [l for l in d.get("logs", []) if l["voucher_no"] == "T-BATCH-SYNC"]
+        if expect("Alert list filter by ignored returns batch-processed alerts",
+                  len(ignored_logs) == len(sync_items),
+                  f"ignored_count={len(ignored_logs)} expected={len(sync_items)}"): passed += 1
+        else: failed += 1
+
+        s, d = man4.get("/api/vouchers?alert_disposition=ignored")
+        v_ignored = [v for v in d.get("vouchers", []) if v["voucher_no"] == "T-BATCH-SYNC"]
+        if expect("Voucher filter by alert_disposition=ignored includes batch-processed voucher",
+                  len(v_ignored) == 1, f"count={len(v_ignored)}"): passed += 1
+        else: failed += 1
+
+        s, d = man4.get("/api/vouchers?alert_disposition=unprocessed")
+        v_unproc = [v for v in d.get("vouchers", []) if v["voucher_no"] == "T-BATCH-SYNC"]
+        if expect("Voucher filter by unprocessed excludes batch-processed voucher",
+                  len(v_unproc) == 0, f"count={len(v_unproc)}"): passed += 1
+        else: failed += 1
+
+        print("\n--- Test 36: Batch Disposition - CSV Export Shows Updated Status ---")
+        url3 = BASE_URL + "/api/vouchers/export.csv"
+        req3 = urllib.request.Request(url3)
+        cookie3 = man4._cookie_header()
+        if cookie3:
+            req3.add_header("Cookie", cookie3)
+        with urllib.request.urlopen(req3) as resp3:
+            csv3 = resp3.read().decode("utf-8")
+        lines3 = csv3.splitlines()
+        sync_rows = [ln for ln in lines3 if "T-BATCH-SYNC" in ln]
+        if expect("CSV includes T-BATCH-SYNC rows", len(sync_rows) > 0,
+                  f"rows={len(sync_rows)}"): passed += 1
+        else: failed += 1
+        has_ignored = any("已忽略" in ln for ln in sync_rows)
+        if expect("CSV shows '已忽略' disposition for batch-processed alerts", has_ignored,
+                  f"has_ignored={has_ignored} rows={sync_rows[:2]}"): passed += 1
+        else: failed += 1
+        has_note = any("确认误报" in ln for ln in sync_rows)
+        if expect("CSV shows disposition note from batch", has_note,
+                  f"has_note={has_note}"): passed += 1
+        else: failed += 1
+        has_handler = any("manager" in ln for ln in sync_rows)
+        if expect("CSV shows disposition handler from batch", has_handler,
+                  f"has_handler={has_handler}"): passed += 1
+        else: failed += 1
+
+        print("\n--- Test 37: Batch Disposition - Persistence Across Restart ---")
+        s, d = man4.get(f"/api/vouchers/{vid_sync}")
+        alerts_before_restart = d.get("alerts", [])
+
+        server.terminate()
+        try: server.wait(timeout=5)
+        except Exception:
+            try: server.kill()
+            except: pass
+        time.sleep(2)
+
+        con2 = sqlite3.connect(str(DB_PATH))
+        con2.row_factory = sqlite3.Row
+        db_rows = con2.execute(
+            "SELECT * FROM alert_logs WHERE voucher_no = ? ORDER BY id",
+            ("T-BATCH-SYNC",)
+        ).fetchall()
+        if expect("Batch disposition persisted in DB (ignored)",
+                  len(db_rows) > 0 and all(r["disposition_status"] == "ignored" for r in db_rows),
+                  f"db_statuses={[r['disposition_status'] for r in db_rows]}"): passed += 1
+        else: failed += 1
+        if expect("Batch disposition note persisted in DB",
+                  all("确认误报" in (r["disposition_note"] or "") for r in db_rows),
+                  f"db_notes={[r['disposition_note'] for r in db_rows]}"): passed += 1
+        else: failed += 1
+        if expect("Batch disposition handler persisted in DB",
+                  all(r["disposition_handler"] == "manager" for r in db_rows),
+                  f"db_handlers={[r['disposition_handler'] for r in db_rows]}"): passed += 1
+        else: failed += 1
+        con2.close()
+
+        server = start_server()
+        time.sleep(0.5)
+        man5 = Session()
+        man5.post("/api/login", {"username":"manager","password":"manager123"})
+
+        s, d = man5.get(f"/api/vouchers/{vid_sync}")
+        alerts_after_restart = d.get("alerts", [])
+        if expect("After restart: batch disposition status still ignored",
+                  len(alerts_after_restart) > 0 and
+                  all(a["disposition_status"] == "ignored" for a in alerts_after_restart),
+                  f"after_restart_statuses={[a['disposition_status'] for a in alerts_after_restart]}"): passed += 1
+        else: failed += 1
+        if expect("After restart: disposition handler still manager",
+                  all(a.get("disposition_handler") == "manager" for a in alerts_after_restart),
+                  f"after_restart_handlers={[a.get('disposition_handler') for a in alerts_after_restart]}"): passed += 1
+        else: failed += 1
+
+        s, d = man5.get("/api/operation-logs")
+        op_logs = d.get("logs", [])
+        has_batch_op = any("批量更新预警处置" in l.get("action", "") for l in op_logs)
+        if expect("Batch disposition logged in operation log", has_batch_op,
+                  f"op_actions={[l.get('action') for l in op_logs[:10]]}"): passed += 1
+        else: failed += 1
+
+        print("\n--- Test 38: Batch Disposition - Single Disposition Still Works (No Regression) ---")
+        s, d = cash2.post("/api/vouchers", {
+            "voucher_no":"T-SINGLE-REG",
+            "shift_code":"中班",
+            "shift_date":"2026-06-12",
+            "cashier":"测试员",
+            "diff_amount": 700.00,
+            "reason":"系统差异",
+            "remark":"单条处置回归测试",
+        })
+        vid_single_reg = d.get("id")
+        s, d = man5.get(f"/api/vouchers/{vid_single_reg}")
+        single_alert = d.get("alerts", [])[0]
+        s, d = man5.post(f"/api/alert-logs/{single_alert['id']}/disposition", {
+            "disposition_status": "follow_up",
+            "disposition_note": "单条处置：跟进调查",
+            "disposition_version": single_alert["disposition_version"]
+        })
+        if expect("Single disposition still works after batch feature added", s == 200 and d.get("ok"),
+                  f"status={s} ok={d.get('ok')}"): passed += 1
+        else: failed += 1
+        if expect("Single disposition updates handler correctly",
+                  d.get("alert", {}).get("disposition_handler") == "manager",
+                  f"handler={d.get('alert',{}).get('disposition_handler')}"): passed += 1
+        else: failed += 1
+        if expect("Single disposition version incremented",
+                  d.get("alert", {}).get("disposition_version") == single_alert["disposition_version"] + 1,
+                  f"version={d.get('alert',{}).get('disposition_version')} expected={single_alert['disposition_version']+1}"): passed += 1
+        else: failed += 1
+
+        s, d = man5.post(f"/api/alert-logs/{single_alert['id']}/disposition", {
+            "disposition_status": "ignored",
+            "disposition_note": "旧版本冲突测试",
+            "disposition_version": single_alert["disposition_version"]
+        })
+        if assert_eq("Single disposition conflict detection still works (409)", s, 409): passed += 1
+        else: failed += 1
+
+        print("\n--- Test 39: Batch Disposition - Import/Export/Revoke Still Work (No Regression) ---")
+        import_csv = (
+            "单据编号,状态,班次,班次日期,收银员,差异金额,原因,备注,创建人\n"
+            "T-BATCH-IMP-01,待复核,晚班,2026-06-12,测试员,800,系统差异,批量处置导入测试,manager\n"
+        ).encode("utf-8-sig")
+        s, d = man5.post("/api/vouchers/import", form_data={
+            "file": ("batch_import.csv", import_csv, "text/csv")
+        })
+        if expect("CSV import still works after batch feature", s == 200 and d.get("success", 0) >= 1,
+                  f"status={s} success={d.get('success')}"): passed += 1
+        else: failed += 1
+
+        s, d = man5.get("/api/vouchers?voucher_no=T-BATCH-IMP-01")
+        imported_v = d.get("vouchers", [{}])[0]
+        imp_id = imported_v.get("id")
+        if expect("Imported voucher exists and has alerts", imp_id is not None,
+                  f"imp_id={imp_id}"): passed += 1
+        else: failed += 1
+
+        url4 = BASE_URL + "/api/vouchers/export.csv"
+        req4 = urllib.request.Request(url4)
+        cookie4 = man5._cookie_header()
+        if cookie4:
+            req4.add_header("Cookie", cookie4)
+        with urllib.request.urlopen(req4) as resp4:
+            csv4 = resp4.read().decode("utf-8")
+        if expect("CSV export still works after batch feature",
+                  "T-BATCH-IMP-01" in csv4,
+                  f"has_imported={'T-BATCH-IMP-01' in csv4}"): passed += 1
+        else: failed += 1
+
+        s, d = man5.post(f"/api/vouchers/{imp_id}/revoke", {"reason":"批量功能下撤销测试"})
+        if expect("Revoke still works after batch feature", s == 200 and d.get("new_voucher_no"),
+                  f"status={s} new_no={d.get('new_voucher_no')}"): passed += 1
+        else: failed += 1
+
         print("\n" + "=" * 70)
         total = passed + failed
         print(f" COMPLETED: Total={total}  Passed={passed}  Failed={failed}")
