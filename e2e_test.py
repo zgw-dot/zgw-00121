@@ -10,6 +10,7 @@ import urllib.request
 import urllib.parse
 import sqlite3
 from pathlib import Path
+from datetime import date as date_type
 
 if sys.platform.startswith("win"):
     try:
@@ -594,8 +595,12 @@ def run():
         if expect("Detail has alerts array", len(detail_alerts) > 0, f"alerts_count={len(detail_alerts)}"): passed += 1
         else: failed += 1
         if expect("Alert has rule_name and alert_reason",
-                  detail_alerts[0].get("rule_name") and detail_alerts[0].get("alert_reason"),
+                  detail_alerts[0].get("rule_name"),
                   f"alert={detail_alerts[0] if detail_alerts else 'N/A'}"): passed += 1
+        else: failed += 1
+        if expect("Cashier cannot see alert_reason in detail",
+                  detail_alerts[0].get("alert_reason") is None,
+                  f"alert_reason={detail_alerts[0].get('alert_reason') if detail_alerts else 'N/A'}"): passed += 1
         else: failed += 1
 
         print("\n--- Test 15: Alert does not block existing flows ---")
@@ -664,8 +669,12 @@ def run():
 
         s, d = cash.get(f"/api/vouchers/{vid_alert1}")
         if expect("Cashier sees alerts in voucher detail",
-                  len(d.get("alerts", [])) > 0 and d["alerts"][0].get("alert_reason"),
+                  len(d.get("alerts", [])) > 0 and d["alerts"][0].get("disposition_status"),
                   f"alerts={d.get('alerts', [])}"): passed += 1
+        else: failed += 1
+        if expect("Cashier CANNOT see alert_reason in detail",
+                  len(d.get("alerts", [])) > 0 and d["alerts"][0].get("alert_reason") is None,
+                  f"alert_reason={d['alerts'][0].get('alert_reason') if d.get('alerts') else 'N/A'}"): passed += 1
         else: failed += 1
 
         print("\n--- Test 16d: Original flows still work (review/close/revoke regression) ---")
@@ -887,7 +896,9 @@ def run():
         s2, d2 = man3.post(f"/api/alert-logs/{alert_id}/disposition", {
             "disposition_status": "follow_up",
             "disposition_note": "经理B处置：需要转财务核实",
-            "disposition_version": current_version
+            "disposition_version": current_version,
+            "follow_up_deadline": "2026-08-15",
+            "follow_up_assignee": "财务李"
         })
         if expect("Manager B first disposition succeeds", s2 == 200, f"status={s2}"): passed += 1
         else: failed += 1
@@ -1125,7 +1136,9 @@ def run():
         s, d = man4.post(f"/api/alert-logs/{new_alert_ids_imm[0]}/disposition", {
             "disposition_status": "follow_up",
             "disposition_note": "新单需财务复核金额",
-            "disposition_version": 0
+            "disposition_version": 0,
+            "follow_up_deadline": "2026-09-01",
+            "follow_up_assignee": "财务王"
         })
         if expect("Can disposition new draft alert independently", s == 200): passed += 1
         else: failed += 1
@@ -1161,8 +1174,8 @@ def run():
                   len(cash_new_alerts) >= 1 and cash_new_alerts[0].get("disposition_status") == "follow_up",
                   f"status={cash_new_alerts[0].get('disposition_status') if cash_new_alerts else 'N/A'}"): passed += 1
         else: failed += 1
-        if expect("Cashier can see disposition handler on new draft alerts",
-                  cash_new_alerts[0].get("disposition_handler") == "manager",
+        if expect("Cashier CANNOT see disposition_handler on new draft alerts",
+                  cash_new_alerts[0].get("disposition_handler") is None,
                   f"handler={cash_new_alerts[0].get('disposition_handler') if cash_new_alerts else 'N/A'}"): passed += 1
         else: failed += 1
 
@@ -1180,7 +1193,7 @@ def run():
         if expect("Cashier can see disposition status", len(alerts_cashier) > 0 and alerts_cashier[0]["disposition_status"] == "follow_up",
                   f"status={alerts_cashier[0]['disposition_status'] if alerts_cashier else 'N/A'}"): passed += 1
         else: failed += 1
-        if expect("Cashier can see disposition handler", alerts_cashier[0].get("disposition_handler") == "manager",
+        if expect("Cashier CANNOT see disposition handler", alerts_cashier[0].get("disposition_handler") is None,
                   f"handler={alerts_cashier[0].get('disposition_handler')}"): passed += 1
         else: failed += 1
         if expect("Cashier can see disposition note", "转财务核实" in (alerts_cashier[0].get("disposition_note") or ""),
@@ -1374,7 +1387,9 @@ def run():
         s, d = man4.post("/api/alert-logs/batch-disposition", {
             "disposition_status": "follow_up",
             "disposition_note": "批量冲突测试",
-            "items": one_stale
+            "items": one_stale,
+            "follow_up_deadline": "2026-10-01",
+            "follow_up_assignee": "冲突测试人"
         })
         if expect("Batch with stale version: conflict >= 1", s == 200,
                   f"status={s}"): passed += 1
@@ -1549,7 +1564,9 @@ def run():
         s, d = man5.post(f"/api/alert-logs/{single_alert['id']}/disposition", {
             "disposition_status": "follow_up",
             "disposition_note": "单条处置：跟进调查",
-            "disposition_version": single_alert["disposition_version"]
+            "disposition_version": single_alert["disposition_version"],
+            "follow_up_deadline": "2026-12-01",
+            "follow_up_assignee": "调查员张"
         })
         if expect("Single disposition still works after batch feature added", s == 200 and d.get("ok"),
                   f"status={s} ok={d.get('ok')}"): passed += 1
@@ -2000,7 +2017,9 @@ def run():
         s, d = man7.post("/api/alert-logs/batch-disposition", {
             "disposition_status": "follow_up",
             "disposition_note": "批量处置回归测试",
-            "items": batch_items
+            "items": batch_items,
+            "follow_up_deadline": "2026-11-01",
+            "follow_up_assignee": "回归测试员"
         })
         if expect("Batch disposition still works", s == 200 and d.get("summary", {}).get("success") >= 1,
                   f"status={s} summary={d.get('summary')}"): passed += 1
@@ -2053,7 +2072,518 @@ def run():
             else: failed += 1
         else:
             passed += 1
-        
+
+        # ===================== FOLLOW-UP CLOSED-LOOP TESTS =====================
+
+        print("\n--- Test 53: Follow-up - Single Disposition with Deadline and Assignee ---")
+        s, d = man7.post("/api/vouchers", {
+            "voucher_no": "T-FOLLOW-001",
+            "shift_code": "早班",
+            "shift_date": "2026-06-12",
+            "cashier": "跟进测试员",
+            "diff_amount": 400.00,
+            "reason": "系统差异",
+            "remark": "跟进闭环测试",
+        })
+        vid_follow = d.get("id")
+        s, d = man7.get(f"/api/vouchers/{vid_follow}")
+        follow_alerts = d.get("alerts", [])
+        if expect("Follow-up test voucher has alerts", len(follow_alerts) > 0, f"alerts={len(follow_alerts)}"): passed += 1
+        else: failed += 1
+
+        follow_alert_id = follow_alerts[0]["id"]
+        follow_alert_version = follow_alerts[0]["disposition_version"]
+
+        s, d = man7.post(f"/api/alert-logs/{follow_alert_id}/disposition", {
+            "disposition_status": "follow_up",
+            "disposition_note": "需跟进核实",
+            "disposition_version": follow_alert_version,
+            "follow_up_deadline": "2026-07-15",
+            "follow_up_assignee": "张经理"
+        })
+        if expect("Disposition as follow_up with deadline/assignee OK", s == 200 and d.get("ok"),
+                  f"status={s}"): passed += 1
+        else: failed += 1
+        updated_alert = d.get("alert", {})
+        if expect("follow_up_deadline saved", updated_alert.get("follow_up_deadline") == "2026-07-15",
+                  f"deadline={updated_alert.get('follow_up_deadline')}"): passed += 1
+        else: failed += 1
+        if expect("follow_up_assignee saved", updated_alert.get("follow_up_assignee") == "张经理",
+                  f"assignee={updated_alert.get('follow_up_assignee')}"): passed += 1
+        else: failed += 1
+
+        print("\n--- Test 54: Follow-up - Missing Deadline/Assignee Validation ---")
+        s, d = man7.post("/api/vouchers", {
+            "voucher_no": "T-FOLLOW-VAL-001",
+            "shift_code": "中班",
+            "shift_date": "2026-06-12",
+            "cashier": "验证测试员",
+            "diff_amount": 500.00,
+            "reason": "系统差异",
+            "remark": "跟进验证测试",
+        })
+        vid_val = d.get("id")
+        s, d = man7.get(f"/api/vouchers/{vid_val}")
+        val_alerts = d.get("alerts", [])
+        val_alert_id = val_alerts[0]["id"]
+        val_alert_version = val_alerts[0]["disposition_version"]
+
+        s, d = man7.post(f"/api/alert-logs/{val_alert_id}/disposition", {
+            "disposition_status": "follow_up",
+            "disposition_note": "缺截止日期",
+            "disposition_version": val_alert_version
+        })
+        if assert_eq("Missing deadline rejected (400)", s, 400): passed += 1
+        else: failed += 1
+        if expect("Error mentions deadline", "截止日期" in (d.get("error","") or ""),
+                  f"error={d.get('error','')}"): passed += 1
+        else: failed += 1
+
+        s, d = man7.post(f"/api/alert-logs/{val_alert_id}/disposition", {
+            "disposition_status": "follow_up",
+            "disposition_note": "缺负责人",
+            "disposition_version": val_alert_version,
+            "follow_up_deadline": "2026-07-15"
+        })
+        if assert_eq("Missing assignee rejected (400)", s, 400): passed += 1
+        else: failed += 1
+        if expect("Error mentions assignee", "负责人" in (d.get("error","") or ""),
+                  f"error={d.get('error','')}"): passed += 1
+        else: failed += 1
+
+        s, d = man7.post(f"/api/alert-logs/{val_alert_id}/disposition", {
+            "disposition_status": "follow_up",
+            "disposition_note": "无效日期",
+            "disposition_version": val_alert_version,
+            "follow_up_deadline": "not-a-date",
+            "follow_up_assignee": "张经理"
+        })
+        if assert_eq("Invalid date format rejected (400)", s, 400): passed += 1
+        else: failed += 1
+
+        print("\n--- Test 55: Follow-up - Cashier Permission Restrictions ---")
+        cash3 = Session()
+        cash3.post("/api/login", {"username":"cashier","password":"cashier123"})
+
+        s, d = cash3.get(f"/api/vouchers/{vid_follow}")
+        cashier_alerts = d.get("alerts", [])
+        if expect("Cashier sees alerts", len(cashier_alerts) > 0, f"count={len(cashier_alerts)}"): passed += 1
+        else: failed += 1
+        if cashier_alerts:
+            ca = cashier_alerts[0]
+            if expect("Cashier CAN see disposition_status",
+                      ca.get("disposition_status") is not None): passed += 1
+            else: failed += 1
+            if expect("Cashier CAN see disposition_note",
+                      ca.get("disposition_note") is not None): passed += 1
+            else: failed += 1
+            if expect("Cashier CANNOT see follow_up_deadline",
+                      ca.get("follow_up_deadline") is None): passed += 1
+            else: failed += 1
+            if expect("Cashier CANNOT see follow_up_assignee",
+                      ca.get("follow_up_assignee") is None): passed += 1
+            else: failed += 1
+            if expect("Cashier CANNOT see due_status",
+                      ca.get("due_status") is None): passed += 1
+            else: failed += 1
+            if expect("Cashier CANNOT see disposition_handler",
+                      ca.get("disposition_handler") is None): passed += 1
+            else: failed += 1
+            if expect("Cashier CANNOT see disposition_time",
+                      ca.get("disposition_time") is None): passed += 1
+            else: failed += 1
+            if expect("Cashier CANNOT see rule_type",
+                      ca.get("rule_type") is None): passed += 1
+            else: failed += 1
+            if expect("Cashier CANNOT see alert_reason",
+                      ca.get("alert_reason") is None): passed += 1
+            else: failed += 1
+
+        s, d = cash3.get("/api/alert-logs")
+        cashier_logs = d.get("logs", [])
+        follow_log = next((l for l in cashier_logs if l["id"] == follow_alert_id), None)
+        if follow_log:
+            if expect("Cashier alert log: no follow_up_deadline",
+                      follow_log.get("follow_up_deadline") is None): passed += 1
+            else: failed += 1
+            if expect("Cashier alert log: no follow_up_assignee",
+                      follow_log.get("follow_up_assignee") is None): passed += 1
+            else: failed += 1
+            if expect("Cashier alert log: no due_status",
+                      follow_log.get("due_status") is None): passed += 1
+            else: failed += 1
+            if expect("Cashier alert log: no rule_id",
+                      follow_log.get("rule_id") is None): passed += 1
+            else: failed += 1
+        else:
+            print(f"  {FAIL} Cashier follow-up log not found")
+            failed += 4
+
+        s, d = cash3.post(f"/api/alert-logs/{follow_alert_id}/disposition", {
+            "disposition_status": "confirmed",
+            "disposition_note": "收银员尝试修改",
+            "disposition_version": d.get("alert", {}).get("disposition_version", 1)
+        })
+        if assert_eq("Cashier cannot modify disposition (403)", s, 403): passed += 1
+        else: failed += 1
+
+        s, d = cash3.get("/api/alert-rules")
+        if assert_eq("Cashier cannot see alert rules config (403)", s, 403): passed += 1
+        else: failed += 1
+
+        print("\n--- Test 56: Follow-up - Due Status Computation ---")
+        con_check = sqlite3.connect(str(DB_PATH))
+        con_check.row_factory = sqlite3.Row
+
+        con_check.execute("UPDATE alert_logs SET follow_up_deadline = '2020-01-01', follow_up_assignee = '过期测试' WHERE id = ?", (follow_alert_id,))
+        con_check.commit()
+        con_check.close()
+
+        s, d = man7.get(f"/api/alert-logs/{follow_alert_id}/disposition")
+        s, d = man7.get(f"/api/vouchers/{vid_follow}")
+        overdue_alert = d.get("alerts", [])[0]
+        if expect("Past deadline => due_status=overdue", overdue_alert.get("due_status") == "overdue",
+                  f"due_status={overdue_alert.get('due_status')}"): passed += 1
+        else: failed += 1
+
+        today_str = date_type.today().isoformat() if hasattr(date_type, 'today') else datetime.now().strftime("%Y-%m-%d")
+        con_check2 = sqlite3.connect(str(DB_PATH))
+        con_check2.row_factory = sqlite3.Row
+        con_check2.execute("UPDATE alert_logs SET follow_up_deadline = ? WHERE id = ?", (today_str, follow_alert_id))
+        con_check2.commit()
+        con_check2.close()
+
+        s, d = man7.get(f"/api/vouchers/{vid_follow}")
+        today_alert = d.get("alerts", [])[0]
+        if expect("Today deadline => due_status=due_today", today_alert.get("due_status") == "due_today",
+                  f"due_status={today_alert.get('due_status')}"): passed += 1
+        else: failed += 1
+
+        future_str = "2099-12-31"
+        con_check3 = sqlite3.connect(str(DB_PATH))
+        con_check3.row_factory = sqlite3.Row
+        con_check3.execute("UPDATE alert_logs SET follow_up_deadline = ? WHERE id = ?", (future_str, follow_alert_id))
+        con_check3.commit()
+        con_check3.close()
+
+        s, d = man7.get(f"/api/vouchers/{vid_follow}")
+        future_alert = d.get("alerts", [])[0]
+        if expect("Future deadline => due_status=not_due", future_alert.get("due_status") == "not_due",
+                  f"due_status={future_alert.get('due_status')}"): passed += 1
+        else: failed += 1
+
+        con_check4 = sqlite3.connect(str(DB_PATH))
+        con_check4.row_factory = sqlite3.Row
+        con_check4.execute("UPDATE alert_logs SET follow_up_deadline = '2026-07-15', follow_up_assignee = '张经理' WHERE id = ?", (follow_alert_id,))
+        con_check4.commit()
+        con_check4.close()
+
+        print("\n--- Test 57: Follow-up - Due Status Filter ---")
+        s, d = man7.get("/api/alert-logs?due_status=overdue")
+        overdue_logs = d.get("logs", [])
+        has_our_overdue = any(l["id"] == follow_alert_id for l in overdue_logs)
+        if expect("Filter overdue does not match our alert (deadline in future)", not has_our_overdue,
+                  f"count={len(overdue_logs)}"): passed += 1
+        else: failed += 1
+
+        s, d = man7.get("/api/alert-logs?due_status=not_due")
+        not_due_logs = d.get("logs", [])
+        has_our_not_due = any(l["id"] == follow_alert_id for l in not_due_logs)
+        if expect("Filter not_due matches our alert", has_our_not_due,
+                  f"count={len(not_due_logs)}"): passed += 1
+        else: failed += 1
+
+        print("\n--- Test 58: Follow-up - Disposition Conflict with Version ---")
+        s, d = man7.get(f"/api/vouchers/{vid_follow}")
+        current_follow = d.get("alerts", [])[0]
+        current_version = current_follow["disposition_version"]
+
+        man8 = Session()
+        man8.post("/api/login", {"username":"admin","password":"admin123"})
+        s, d = man8.post(f"/api/alert-logs/{follow_alert_id}/disposition", {
+            "disposition_status": "follow_up",
+            "disposition_note": "管理员更新跟进",
+            "disposition_version": current_version,
+            "follow_up_deadline": "2026-08-01",
+            "follow_up_assignee": "李主管"
+        })
+        if expect("Admin updates follow-up disposition OK", s == 200, f"status={s}"): passed += 1
+        else: failed += 1
+
+        s, d = man7.post(f"/api/alert-logs/{follow_alert_id}/disposition", {
+            "disposition_status": "confirmed",
+            "disposition_note": "旧版本尝试",
+            "disposition_version": current_version
+        })
+        if assert_eq("Stale version rejected with 409", s, 409): passed += 1
+        else: failed += 1
+        conflict_current = d.get("current", {})
+        if expect("Conflict response has updated follow_up_deadline",
+                  conflict_current.get("follow_up_deadline") == "2026-08-01",
+                  f"deadline={conflict_current.get('follow_up_deadline')}"): passed += 1
+        else: failed += 1
+        if expect("Conflict response has updated follow_up_assignee",
+                  conflict_current.get("follow_up_assignee") == "李主管",
+                  f"assignee={conflict_current.get('follow_up_assignee')}"): passed += 1
+        else: failed += 1
+
+        print("\n--- Test 59: Follow-up - Persistence Across Restart ---")
+        server.terminate()
+        try: server.wait(timeout=5)
+        except Exception:
+            try: server.kill()
+            except: pass
+        time.sleep(2)
+
+        con_persist = sqlite3.connect(str(DB_PATH))
+        con_persist.row_factory = sqlite3.Row
+        row_persist = con_persist.execute("SELECT * FROM alert_logs WHERE id = ?", (follow_alert_id,)).fetchone()
+        if expect("Follow-up deadline persisted in SQLite", row_persist["follow_up_deadline"] == "2026-08-01",
+                  f"deadline={row_persist['follow_up_deadline']}"): passed += 1
+        else: failed += 1
+        if expect("Follow-up assignee persisted in SQLite", row_persist["follow_up_assignee"] == "李主管",
+                  f"assignee={row_persist['follow_up_assignee']}"): passed += 1
+        else: failed += 1
+        con_persist.close()
+
+        server = start_server()
+        time.sleep(0.5)
+        man9 = Session()
+        man9.post("/api/login", {"username":"manager","password":"manager123"})
+
+        s, d = man9.get(f"/api/vouchers/{vid_follow}")
+        restart_alerts = d.get("alerts", [])
+        if expect("After restart follow-up info present", len(restart_alerts) > 0): passed += 1
+        else: failed += 1
+        ra = restart_alerts[0]
+        if expect("After restart deadline preserved", ra.get("follow_up_deadline") == "2026-08-01",
+                  f"deadline={ra.get('follow_up_deadline')}"): passed += 1
+        else: failed += 1
+        if expect("After restart assignee preserved", ra.get("follow_up_assignee") == "李主管",
+                  f"assignee={ra.get('follow_up_assignee')}"): passed += 1
+        else: failed += 1
+        if expect("After restart due_status computed", ra.get("due_status") in ("overdue","due_today","not_due"),
+                  f"due_status={ra.get('due_status')}"): passed += 1
+        else: failed += 1
+
+        print("\n--- Test 60: Follow-up - CSV Export Includes Follow-up Fields ---")
+        url_csv = BASE_URL + "/api/vouchers/export.csv"
+        req_csv = urllib.request.Request(url_csv)
+        ck_csv = man9._cookie_header()
+        if ck_csv: req_csv.add_header("Cookie", ck_csv)
+        with urllib.request.urlopen(req_csv) as resp_csv:
+            csv_content = resp_csv.read().decode("utf-8")
+        csv_lines = csv_content.splitlines()
+        csv_header = csv_lines[0]
+        if expect("CSV header has 跟进截止日期", "跟进截止日期" in csv_header, f"header={csv_header}"): passed += 1
+        else: failed += 1
+        if expect("CSV header has 跟进负责人", "跟进负责人" in csv_header, f"header={csv_header}"): passed += 1
+        else: failed += 1
+        if expect("CSV header has 到期状态", "到期状态" in csv_header, f"header={csv_header}"): passed += 1
+        else: failed += 1
+        follow_rows = [ln for ln in csv_lines if "T-FOLLOW-001" in ln]
+        has_deadline = any("2026-08-01" in ln for ln in follow_rows)
+        has_assignee = any("李主管" in ln for ln in follow_rows)
+        if expect("CSV data has follow_up_deadline", has_deadline, f"rows={len(follow_rows)}"): passed += 1
+        else: failed += 1
+        if expect("CSV data has follow_up_assignee", has_assignee): passed += 1
+        else: failed += 1
+        has_due_label = any("未到期" in ln or "已逾期" in ln or "今天到期" in ln for ln in follow_rows)
+        if expect("CSV data has due_status label", has_due_label): passed += 1
+        else: failed += 1
+
+        print("\n--- Test 61: Follow-up - Non-follow-up Clears Follow-up Fields ---")
+        s, d = man9.get(f"/api/vouchers/{vid_follow}")
+        latest_follow = d.get("alerts", [])[0]
+        s, d = man9.post(f"/api/alert-logs/{follow_alert_id}/disposition", {
+            "disposition_status": "confirmed",
+            "disposition_note": "已确认处理完毕",
+            "disposition_version": latest_follow["disposition_version"]
+        })
+        if expect("Change from follow_up to confirmed OK", s == 200, f"status={s}"): passed += 1
+        else: failed += 1
+        confirmed_alert = d.get("alert", {})
+        if expect("follow_up_deadline cleared when not follow_up",
+                  confirmed_alert.get("follow_up_deadline") is None,
+                  f"deadline={confirmed_alert.get('follow_up_deadline')}"): passed += 1
+        else: failed += 1
+        if expect("follow_up_assignee cleared when not follow_up",
+                  confirmed_alert.get("follow_up_assignee") is None,
+                  f"assignee={confirmed_alert.get('follow_up_assignee')}"): passed += 1
+        else: failed += 1
+
+        print("\n--- Test 62: Follow-up - Batch Disposition with Follow-up Fields ---")
+        s, d = man9.post("/api/vouchers", {
+            "voucher_no": "T-BATCH-FOLLOW-001",
+            "shift_code": "晚班",
+            "shift_date": "2026-06-12",
+            "cashier": "批量跟进测试员",
+            "diff_amount": 600.00,
+            "reason": "系统差异",
+            "remark": "批量跟进闭环测试",
+        })
+        vid_batch_follow = d.get("id")
+        s, d = man9.get(f"/api/vouchers/{vid_batch_follow}")
+        batch_follow_alerts = d.get("alerts", [])
+        batch_follow_items = [{"id": a["id"], "disposition_version": a["disposition_version"]} for a in batch_follow_alerts]
+
+        s, d = man9.post("/api/alert-logs/batch-disposition", {
+            "disposition_status": "follow_up",
+            "disposition_note": "批量跟进处置",
+            "items": batch_follow_items,
+            "follow_up_deadline": "2026-09-01",
+            "follow_up_assignee": "王主管"
+        })
+        if expect("Batch follow_up disposition OK", s == 200 and d.get("summary", {}).get("success", 0) >= 1,
+                  f"status={s} summary={d.get('summary')}"): passed += 1
+        else: failed += 1
+
+        s, d = man9.get(f"/api/vouchers/{vid_batch_follow}")
+        batch_follow_result = d.get("alerts", [])
+        if expect("Batch follow_up: deadline saved",
+                  all(a.get("follow_up_deadline") == "2026-09-01" for a in batch_follow_result),
+                  f"deadlines={[a.get('follow_up_deadline') for a in batch_follow_result]}"): passed += 1
+        else: failed += 1
+        if expect("Batch follow_up: assignee saved",
+                  all(a.get("follow_up_assignee") == "王主管" for a in batch_follow_result),
+                  f"assignees={[a.get('follow_up_assignee') for a in batch_follow_result]}"): passed += 1
+        else: failed += 1
+
+        print("\n--- Test 63: Follow-up - Batch Validation: Missing Deadline/Assignee ---")
+        s, d = man9.post("/api/vouchers", {
+            "voucher_no": "T-BATCH-VAL-001",
+            "shift_code": "早班",
+            "shift_date": "2026-06-12",
+            "cashier": "批量验证测试员",
+            "diff_amount": 700.00,
+            "reason": "系统差异",
+            "remark": "批量验证测试",
+        })
+        vid_bval = d.get("id")
+        s, d = man9.get(f"/api/vouchers/{vid_bval}")
+        bval_alerts = d.get("alerts", [])
+        bval_items = [{"id": a["id"], "disposition_version": a["disposition_version"]} for a in bval_alerts]
+
+        s, d = man9.post("/api/alert-logs/batch-disposition", {
+            "disposition_status": "follow_up",
+            "disposition_note": "缺截止日期",
+            "items": bval_items
+        })
+        if assert_eq("Batch follow_up missing deadline rejected (400)", s, 400): passed += 1
+        else: failed += 1
+
+        s, d = man9.post("/api/alert-logs/batch-disposition", {
+            "disposition_status": "follow_up",
+            "disposition_note": "缺负责人",
+            "items": bval_items,
+            "follow_up_deadline": "2026-08-01"
+        })
+        if assert_eq("Batch follow_up missing assignee rejected (400)", s, 400): passed += 1
+        else: failed += 1
+
+        print("\n--- Test 64: Follow-up - Operation Log Records Follow-up Info ---")
+        s, d = man9.get("/api/operation-logs")
+        op_logs = d.get("logs", [])
+        has_follow_log = any(
+            "截止日期" in (l.get("detail") or "") or "负责人" in (l.get("detail") or "")
+            for l in op_logs
+        )
+        if expect("Operation log contains follow-up info", has_follow_log,
+                  f"sample_details={[l.get('detail','')[:80] for l in op_logs[:5]]}"): passed += 1
+        else: failed += 1
+
+        print("\n--- Test 65: Follow-up - Original Single/Batch Disposition Still Works ---")
+        s, d = man9.post("/api/vouchers", {
+            "voucher_no": "T-FOLLOW-REG-001",
+            "shift_code": "中班",
+            "shift_date": "2026-06-12",
+            "cashier": "回归测试员",
+            "diff_amount": 350.00,
+            "reason": "系统差异",
+            "remark": "原有流程回归测试",
+        })
+        vid_freg = d.get("id")
+        s, d = man9.get(f"/api/vouchers/{vid_freg}")
+        freg_alerts = d.get("alerts", [])
+
+        s, d = man9.post(f"/api/alert-logs/{freg_alerts[0]['id']}/disposition", {
+            "disposition_status": "confirmed",
+            "disposition_note": "回归测试：已确认",
+            "disposition_version": freg_alerts[0]["disposition_version"]
+        })
+        if expect("Single disposition confirmed still works", s == 200, f"status={s}"): passed += 1
+        else: failed += 1
+
+        s, d = man9.post("/api/vouchers", {
+            "voucher_no": "T-FOLLOW-REG-002",
+            "shift_code": "晚班",
+            "shift_date": "2026-06-12",
+            "cashier": "批量回归测试员",
+            "diff_amount": 450.00,
+            "reason": "系统差异",
+            "remark": "批量处置回归测试",
+        })
+        vid_freg2 = d.get("id")
+        s, d = man9.get(f"/api/vouchers/{vid_freg2}")
+        freg2_alerts = d.get("alerts", [])
+        freg2_items = [{"id": a["id"], "disposition_version": a["disposition_version"]} for a in freg2_alerts]
+
+        s, d = man9.post("/api/alert-logs/batch-disposition", {
+            "disposition_status": "ignored",
+            "disposition_note": "回归测试：已忽略",
+            "items": freg2_items
+        })
+        if expect("Batch disposition ignored still works", s == 200 and d.get("summary", {}).get("success", 0) >= 1,
+                  f"status={s}"): passed += 1
+        else: failed += 1
+
+        print("\n--- Test 66: Follow-up - Rule Preview/Import/Export/Revoke No Regression ---")
+        s, d = man9.post("/api/alert-rules/preview", {
+            "name": "回归预览",
+            "rule_type": "single_amount",
+            "threshold": 100,
+            "enabled": True
+        })
+        if expect("Preview API still works", s == 200, f"status={s}"): passed += 1
+        else: failed += 1
+
+        url_r_exp = BASE_URL + "/api/alert-rules/export.csv"
+        req_r_exp = urllib.request.Request(url_r_exp)
+        ck_r = man9._cookie_header()
+        if ck_r: req_r_exp.add_header("Cookie", ck_r)
+        with urllib.request.urlopen(req_r_exp) as resp_r:
+            rules_csv_content = resp_r.read().decode("utf-8")
+        if expect("Rules CSV export still works", "规则名称" in rules_csv_content): passed += 1
+        else: failed += 1
+
+        s, d = man9.post(f"/api/vouchers/{vid_freg}/revoke", {"reason":"跟进功能回归撤销测试"})
+        if expect("Revoke still works", s == 200 and d.get("new_voucher_no"),
+                  f"status={s}"): passed += 1
+        else: failed += 1
+
+        print("\n--- Test 67: Follow-up - Cashier Sees Only Disposition Conclusion in Voucher List ---")
+        s, d = cash3.get("/api/vouchers")
+        cashier_vouchers = d.get("vouchers", [])
+        batch_follow_v = next((v for v in cashier_vouchers if v["voucher_no"] == "T-BATCH-FOLLOW-001"), None)
+        if batch_follow_v:
+            wr = batch_follow_v.get("warning_reasons", [])
+            if wr:
+                if expect("Cashier voucher list: has disposition_status",
+                          wr[0].get("disposition_status") is not None): passed += 1
+                else: failed += 1
+                if expect("Cashier voucher list: no follow_up_deadline",
+                          wr[0].get("follow_up_deadline") is None): passed += 1
+                else: failed += 1
+                if expect("Cashier voucher list: no follow_up_assignee",
+                          wr[0].get("follow_up_assignee") is None): passed += 1
+                else: failed += 1
+            else:
+                print(f"  {FAIL} No warning_reasons for cashier voucher list")
+                failed += 3
+        else:
+            print(f"  {FAIL} T-BATCH-FOLLOW-001 not found in cashier voucher list")
+            failed += 3
+
         print("\n" + "=" * 70)
         total = passed + failed
         print(f" COMPLETED: Total={total}  Passed={passed}  Failed={failed}")

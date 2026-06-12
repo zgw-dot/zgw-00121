@@ -62,6 +62,9 @@ tbody tr:hover{background:#f9fafb}
 .disp-confirmed{background:#d1fae5;color:#065f46}
 .disp-follow_up{background:#fef3c7;color:#92400e}
 .disp-ignored{background:#e5e7eb;color:#6b7280}
+.due-overdue{background:#fee2e2;color:#991b1b}
+.due-due_today{background:#fef3c7;color:#92400e}
+.due-not_due{background:#d1fae5;color:#065f46}
 .amount{font-weight:600;font-family:"Consolas",monospace}
 .amount.neg{color:#dc2626}
 .amount.pos{color:#059669}
@@ -238,6 +241,15 @@ tbody tr:hover{background:#f9fafb}
               <option value="ignored">已忽略</option>
             </select>
           </div>
+          <div class="form-group" style="margin:0;min-width:160px">
+            <label>到期状态</label>
+            <select id="filterDueStatus" onchange="loadAlertPanel()">
+              <option value="">全部</option>
+              <option value="overdue">已逾期</option>
+              <option value="due_today">今天到期</option>
+              <option value="not_due">未到期</option>
+            </select>
+          </div>
           {% if user.role in ['admin','manager'] %}
           <div class="spacer"></div>
           <span id="batchSelectInfo" style="font-size:13px;color:#6b7280;margin-right:8px">未选择</span>
@@ -251,7 +263,17 @@ tbody tr:hover{background:#f9fafb}
                 {% if user.role in ['admin','manager'] %}
                 <th style="width:36px"><input type="checkbox" id="selectAllAlerts" onchange="toggleSelectAllAlerts(this)"></th>
                 {% endif %}
-                <th>时间</th><th>单据编号</th><th>规则名称</th><th>预警原因</th><th>处置状态</th><th>处置人</th><th>处置时间</th><th>操作</th>
+                <th>时间</th><th>单据编号</th>
+                {% if user.role in ['admin','manager'] %}
+                <th>规则名称</th><th>预警原因</th>
+                {% endif %}
+                <th>处置状态</th>
+                {% if user.role in ['admin','manager'] %}
+                <th>处置人</th><th>处置时间</th><th>跟进截止</th><th>跟进负责人</th><th>到期状态</th>
+                {% endif %}
+                {% if user.role in ['admin','manager'] %}
+                <th>操作</th>
+                {% endif %}
               </tr>
             </thead>
             <tbody id="alertLogList"></tbody>
@@ -406,7 +428,7 @@ tbody tr:hover{background:#f9fafb}
       <div id="dispositionAlertInfo" class="alert-box" style="margin-bottom:16px"></div>
       <div class="form-group">
         <label>处置状态 <span style="color:#ef4444">*</span></label>
-        <select id="dispStatus">
+        <select id="dispStatus" onchange="toggleFollowUpFields('dispStatus','followUpFields')">
           <option value="unprocessed">未处理</option>
           <option value="confirmed">已确认</option>
           <option value="follow_up">需跟进</option>
@@ -416,6 +438,18 @@ tbody tr:hover{background:#f9fafb}
       <div class="form-group">
         <label>处置备注</label>
         <textarea id="dispNote" placeholder="请填写处置说明、跟进计划等..."></textarea>
+      </div>
+      <div id="followUpFields" class="hidden">
+        <div class="row">
+          <div class="form-group">
+            <label>跟进截止日期 <span style="color:#ef4444">*</span></label>
+            <input id="dispFollowUpDeadline" type="date">
+          </div>
+          <div class="form-group">
+            <label>跟进负责人 <span style="color:#ef4444">*</span></label>
+            <input id="dispFollowUpAssignee" placeholder="请填写跟进负责人">
+          </div>
+        </div>
       </div>
     </div>
     <div class="modal-footer">
@@ -436,7 +470,7 @@ tbody tr:hover{background:#f9fafb}
       <div class="alert-box" id="batchDispositionSummary" style="margin-bottom:16px"></div>
       <div class="form-group">
         <label>处置状态 <span style="color:#ef4444">*</span></label>
-        <select id="batchDispStatus">
+        <select id="batchDispStatus" onchange="toggleFollowUpFields('batchDispStatus','batchFollowUpFields')">
           <option value="confirmed">已确认</option>
           <option value="follow_up">需跟进</option>
           <option value="ignored">已忽略</option>
@@ -445,6 +479,18 @@ tbody tr:hover{background:#f9fafb}
       <div class="form-group">
         <label>处置备注</label>
         <textarea id="batchDispNote" placeholder="请填写统一的处置说明、跟进计划等..."></textarea>
+      </div>
+      <div id="batchFollowUpFields" class="hidden">
+        <div class="row">
+          <div class="form-group">
+            <label>跟进截止日期 <span style="color:#ef4444">*</span></label>
+            <input id="batchFollowUpDeadline" type="date">
+          </div>
+          <div class="form-group">
+            <label>跟进负责人 <span style="color:#ef4444">*</span></label>
+            <input id="batchFollowUpAssignee" placeholder="请填写跟进负责人">
+          </div>
+        </div>
       </div>
       <div id="batchDispositionResults" class="hidden">
         <h4 style="font-size:14px;color:#111827;margin-bottom:12px;padding-bottom:8px;border-bottom:1px solid #e5e7eb">处置结果明细</h4>
@@ -563,6 +609,11 @@ const DISP_STATUS_TEXT = {
   follow_up:'需跟进',
   ignored:'已忽略'
 };
+const DUE_STATUS_TEXT = {
+  overdue:'已逾期',
+  due_today:'今天到期',
+  not_due:'未到期'
+};
 let tempDispositionAlertId = null;
 let tempDispositionVersion = null;
 let editingId = null;
@@ -573,6 +624,16 @@ let tempRevokeVid = null;
 let tempCloseVid = null;
 let editingRuleId = null;
 let selectedAlerts = new Map();
+
+function toggleFollowUpFields(selectId, fieldsId){
+  const status = document.getElementById(selectId).value;
+  const fields = document.getElementById(fieldsId);
+  if(status === 'follow_up'){
+    fields.classList.remove('hidden');
+  } else {
+    fields.classList.add('hidden');
+  }
+}
 
 async function api(url, opt={}) {
   const o = Object.assign({headers:{'Content-Type':'application/json'}, credentials:'same-origin'}, opt);
@@ -654,6 +715,12 @@ function renderDispBadge(status){
   if(!status) return '<span style="color:#d1d5db">—</span>';
   const label = DISP_STATUS_TEXT[status] || status;
   return `<span class="status disp-${status}" title="${label}">${label}</span>`;
+}
+
+function renderDueBadge(dueStatus){
+  if(!dueStatus) return '<span style="color:#d1d5db">—</span>';
+  const label = DUE_STATUS_TEXT[dueStatus] || dueStatus;
+  return `<span class="status due-${dueStatus}" title="${label}">${label}</span>`;
 }
 
 function renderAlertTag(warnings){
@@ -834,15 +901,20 @@ async function openDetail(vid){
   if(alerts.length>0){
     alertBoxHtml = `<div class="alert-box"><strong>⚠ 异常预警 (${alerts.length}条)</strong>`;
     alerts.forEach(a=>{
+      const isCashierDetail = ROLE === 'cashier';
       alertBoxHtml += `<div class="alert-item">
         <div style="margin-bottom:4px">
-          <strong>${a.rule_name}</strong> [${RULE_TYPE_TEXT[a.rule_type]||a.rule_type}]：${a.alert_reason}
+          ${!isCashierDetail?`<strong>${a.rule_name||''}</strong> [${RULE_TYPE_TEXT[a.rule_type]||a.rule_type||''}]${a.alert_reason?'：'+a.alert_reason:''}`:''}
+          ${isCashierDetail?`<strong>预警通知</strong>`:''}
         </div>
         <div style="font-size:12px;color:#6b7280;padding-left:12px">
           处置：${renderDispBadge(a.disposition_status)}
           ${a.disposition_note?` <span style="margin-left:8px">备注：${a.disposition_note}</span>`:''}
-          ${a.disposition_handler?` <span style="margin-left:8px">处理人：${a.disposition_handler}</span>`:''}
-          ${a.disposition_time?` <span style="margin-left:8px">@ ${a.disposition_time}</span>`:''}
+          ${!isCashierDetail && a.disposition_handler?` <span style="margin-left:8px">处理人：${a.disposition_handler}</span>`:''}
+          ${!isCashierDetail && a.disposition_time?` <span style="margin-left:8px">@ ${a.disposition_time}</span>`:''}
+          ${!isCashierDetail && a.follow_up_deadline?` <span style="margin-left:8px">跟进截止：${a.follow_up_deadline}</span>`:''}
+          ${!isCashierDetail && a.follow_up_assignee?` <span style="margin-left:8px">负责人：${a.follow_up_assignee}</span>`:''}
+          ${!isCashierDetail && a.due_status?` <span style="margin-left:8px">${renderDueBadge(a.due_status)}</span>`:''}
           ${isMgr?` <button class="btn btn-sm btn-outline" style="margin-left:8px;padding:2px 8px;font-size:11px" onclick="openDisposition(${a.id},${a.disposition_version})">处置</button>`:''}
         </div>
       </div>`;
@@ -1002,7 +1074,10 @@ async function importCSV(input){
 
 async function loadAlertPanel(){
   const dispFilter = document.getElementById('filterAlertLogDisp')?.value || '';
-  const reqs = [api('/api/alert-logs?disposition_status='+encodeURIComponent(dispFilter))];
+  const dueFilter = document.getElementById('filterDueStatus')?.value || '';
+  let url = '/api/alert-logs?disposition_status=' + encodeURIComponent(dispFilter);
+  if(dueFilter) url += '&due_status=' + encodeURIComponent(dueFilter);
+  const reqs = [api(url)];
   const isMgr = ['admin','manager'].includes(ROLE);
   if(isMgr) reqs.unshift(api('/api/alert-rules'));
   const results = await Promise.all(reqs);
@@ -1042,24 +1117,30 @@ function renderRuleList(rules){
 function renderAlertLogs(logs){
   const el = document.getElementById('alertLogList');
   const isMgr = ['admin','manager'].includes(ROLE);
+  const isCashier = ROLE === 'cashier';
+  const colCount = isMgr ? 12 : 10;
   if(!logs.length){
-    el.innerHTML = `<tr><td colspan="${isMgr?9:8}" style="text-align:center;color:#9ca3af;padding:20px">暂无预警记录</td></tr>`;
+    el.innerHTML = `<tr><td colspan="${colCount}" style="text-align:center;color:#9ca3af;padding:20px">暂无预警记录</td></tr>`;
     if(isMgr) updateBatchSelectInfo();
     return;
   }
   el.innerHTML = logs.map(l=>{
     const checked = selectedAlerts.has(l.id);
+    const showFollowUp = isMgr && l.follow_up_deadline;
     return `
     <tr>
       ${isMgr?`<td><input type="checkbox" class="alert-checkbox" data-id="${l.id}" data-version="${l.disposition_version}"
         onchange="toggleSelectAlert(${l.id}, ${l.disposition_version}, '${l.voucher_no.replace(/'/g,"\\'")}', '${l.rule_name.replace(/'/g,"\\'")}', this)" ${checked?'checked':''}></td>`:''}
       <td>${l.created_at}</td>
       <td style="cursor:pointer;color:#2563eb" onclick="switchTab('vouchers')">${l.voucher_no}</td>
-      <td>${l.rule_name}</td>
-      <td style="max-width:200px;overflow:hidden;text-overflow:ellipsis" title="${l.alert_reason}">${l.alert_reason}</td>
+      ${!isCashier?`<td>${l.rule_name||'—'}</td>`:''}
+      ${!isCashier?`<td style="max-width:200px;overflow:hidden;text-overflow:ellipsis" title="${l.alert_reason||''}">${l.alert_reason||'—'}</td>`:''}
       <td>${renderDispBadge(l.disposition_status)}</td>
-      <td>${l.disposition_handler||'—'}</td>
-      <td>${l.disposition_time||'—'}</td>
+      ${!isCashier?`<td>${l.disposition_handler||'—'}</td>`:''}
+      ${!isCashier?`<td>${l.disposition_time||'—'}</td>`:''}
+      ${isMgr?`<td>${l.follow_up_deadline||'—'}</td>`:''}
+      ${isMgr?`<td>${l.follow_up_assignee||'—'}</td>`:''}
+      ${isMgr?`<td>${renderDueBadge(l.due_status)}</td>`:''}
       ${isMgr?`<td><button class="btn btn-sm btn-outline" onclick="openDisposition(${l.id},${l.disposition_version})">处置</button></td>`:''}
     </tr>`;
   }).join('');
@@ -1114,24 +1195,33 @@ function openDisposition(alertId, version){
   tempDispositionAlertId = alertId;
   tempDispositionVersion = version;
   document.getElementById('dispositionAlert').classList.add('hidden');
+  document.getElementById('dispFollowUpDeadline').value = '';
+  document.getElementById('dispFollowUpAssignee').value = '';
+  document.getElementById('followUpFields').classList.add('hidden');
 
   api('/api/alert-logs').then(r=>{
     if(!r.ok) return;
     const alert = r.data.logs.find(l=>l.id===alertId);
     if(alert){
       document.getElementById('dispositionAlertInfo').innerHTML = `
-        <div class="alert-item"><strong>${alert.rule_name}</strong>：${alert.alert_reason}</div>
+        <div class="alert-item"><strong>${alert.rule_name||''}</strong>${alert.alert_reason?'：'+alert.alert_reason:''}</div>
         ${alert.disposition_status!=='unprocessed'?`
         <div class="alert-item" style="font-size:12px;color:#6b7280">
           当前处置：${renderDispBadge(alert.disposition_status)}
           ${alert.disposition_note?` <span style="margin-left:8px">备注：${alert.disposition_note}</span>`:''}
           ${alert.disposition_handler?` <span style="margin-left:8px">处理人：${alert.disposition_handler}</span>`:''}
           ${alert.disposition_time?` <span style="margin-left:8px">@ ${alert.disposition_time}</span>`:''}
+          ${alert.follow_up_deadline?` <span style="margin-left:8px">跟进截止：${alert.follow_up_deadline}</span>`:''}
+          ${alert.follow_up_assignee?` <span style="margin-left:8px">负责人：${alert.follow_up_assignee}</span>`:''}
+          ${alert.due_status?` <span style="margin-left:8px">${renderDueBadge(alert.due_status)}</span>`:''}
         </div>`:''}
       `;
       document.getElementById('dispStatus').value = alert.disposition_status;
       document.getElementById('dispNote').value = alert.disposition_note || '';
+      if(alert.follow_up_deadline) document.getElementById('dispFollowUpDeadline').value = alert.follow_up_deadline;
+      if(alert.follow_up_assignee) document.getElementById('dispFollowUpAssignee').value = alert.follow_up_assignee;
       tempDispositionVersion = alert.disposition_version;
+      toggleFollowUpFields('dispStatus','followUpFields');
     }
   });
 
@@ -1141,13 +1231,18 @@ function openDisposition(alertId, version){
 async function saveDisposition(){
   const status = document.getElementById('dispStatus').value;
   const note = document.getElementById('dispNote').value.trim();
+  const body = {
+    disposition_status: status,
+    disposition_note: note,
+    disposition_version: tempDispositionVersion
+  };
+  if(status === 'follow_up'){
+    body.follow_up_deadline = document.getElementById('dispFollowUpDeadline').value;
+    body.follow_up_assignee = document.getElementById('dispFollowUpAssignee').value.trim();
+  }
   const r = await api(`/api/alert-logs/${tempDispositionAlertId}/disposition`, {
     method:'POST',
-    body:{
-      disposition_status: status,
-      disposition_note: note,
-      disposition_version: tempDispositionVersion
-    }
+    body: body
   });
   if(!r.ok){
     if(r.status===409 && r.data?.current){
@@ -1156,6 +1251,9 @@ async function saveDisposition(){
       tempDispositionVersion = cur.disposition_version;
       document.getElementById('dispStatus').value = cur.disposition_status;
       document.getElementById('dispNote').value = cur.disposition_note || '';
+      if(cur.follow_up_deadline) document.getElementById('dispFollowUpDeadline').value = cur.follow_up_deadline;
+      if(cur.follow_up_assignee) document.getElementById('dispFollowUpAssignee').value = cur.follow_up_assignee;
+      toggleFollowUpFields('dispStatus','followUpFields');
       return;
     }
     showAlert('dispositionAlert', r.error, 'danger');
@@ -1181,6 +1279,9 @@ function openBatchDisposition(){
   document.getElementById('batchDispositionResults').classList.add('hidden');
   document.getElementById('batchDispStatus').value = 'confirmed';
   document.getElementById('batchDispNote').value = '';
+  document.getElementById('batchFollowUpDeadline').value = '';
+  document.getElementById('batchFollowUpAssignee').value = '';
+  document.getElementById('batchFollowUpFields').classList.add('hidden');
   document.getElementById('batchDispSubmitBtn').style.display = '';
   const items = Array.from(selectedAlerts.values());
   const summaryHtml = `
@@ -1200,14 +1301,19 @@ async function saveBatchDisposition(){
   const status = document.getElementById('batchDispStatus').value;
   const note = document.getElementById('batchDispNote').value.trim();
   const items = Array.from(selectedAlerts.values()).map(a=>({id:a.id, disposition_version:a.version}));
+  const body = {
+    disposition_status: status,
+    disposition_note: note,
+    items: items
+  };
+  if(status === 'follow_up'){
+    body.follow_up_deadline = document.getElementById('batchFollowUpDeadline').value;
+    body.follow_up_assignee = document.getElementById('batchFollowUpAssignee').value.trim();
+  }
 
   const r = await api('/api/alert-logs/batch-disposition', {
     method:'POST',
-    body:{
-      disposition_status: status,
-      disposition_note: note,
-      items: items
-    }
+    body: body
   });
 
   if(!r.ok){

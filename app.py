@@ -3,7 +3,7 @@ import csv
 import io
 import secrets
 import sqlite3
-from datetime import datetime
+from datetime import datetime, date as date_type
 from functools import wraps
 from pathlib import Path
 
@@ -39,6 +39,32 @@ DISP_STATUS_LABELS = {
     DISP_FOLLOW_UP: "需跟进",
     DISP_IGNORED: "已忽略",
 }
+
+DUE_OVERDUE = "overdue"
+DUE_TODAY = "due_today"
+DUE_NOT_DUE = "not_due"
+
+DUE_STATUS_LABELS = {
+    DUE_OVERDUE: "已逾期",
+    DUE_TODAY: "今天到期",
+    DUE_NOT_DUE: "未到期",
+}
+
+
+def compute_due_status(deadline_str):
+    if not deadline_str:
+        return None
+    try:
+        deadline = date_type.fromisoformat(deadline_str)
+    except (ValueError, TypeError):
+        return None
+    today = date_type.today()
+    if deadline < today:
+        return DUE_OVERDUE
+    elif deadline == today:
+        return DUE_TODAY
+    else:
+        return DUE_NOT_DUE
 
 DEFAULT_USERS = [
     {"username": "admin",   "password": "admin123",  "role": ROLE_ADMIN,   "display_name": "系统管理员"},
@@ -169,7 +195,9 @@ def init_db():
         disposition_note TEXT,
         disposition_handler TEXT,
         disposition_time TEXT,
-        disposition_version INTEGER NOT NULL DEFAULT 0
+        disposition_version INTEGER NOT NULL DEFAULT 0,
+        follow_up_deadline TEXT,
+        follow_up_assignee TEXT
     );
     CREATE INDEX IF NOT EXISTS idx_alert_logs_voucher ON alert_logs(voucher_no);
     CREATE INDEX IF NOT EXISTS idx_alert_logs_rule ON alert_logs(rule_id);
@@ -194,6 +222,8 @@ def init_db():
         ("disposition_handler", "TEXT"),
         ("disposition_time", "TEXT"),
         ("disposition_version", "INTEGER NOT NULL DEFAULT 0"),
+        ("follow_up_deadline", "TEXT"),
+        ("follow_up_assignee", "TEXT"),
     ]
     for col_name, col_def in migration_cols:
         if col_name not in existing_cols:
@@ -433,7 +463,8 @@ def api_list_vouchers():
         alert_sql = f"""
             SELECT id, voucher_no, rule_name, rule_type, alert_reason, created_at,
                    disposition_status, disposition_note, disposition_handler,
-                   disposition_time, disposition_version
+                   disposition_time, disposition_version,
+                   follow_up_deadline, follow_up_assignee
             FROM alert_logs WHERE voucher_no IN ({placeholders})
         """
         alert_params = list(vnos)
@@ -441,8 +472,10 @@ def api_list_vouchers():
             alert_sql += " AND disposition_status = ?"
             alert_params.append(alert_disp)
         alert_rows = db.execute(alert_sql, alert_params).fetchall()
+        is_cashier = current_user()["role"] == ROLE_CASHIER
         for ar in alert_rows:
-            alert_map.setdefault(ar["voucher_no"], []).append({
+            due_status = compute_due_status(ar["follow_up_deadline"])
+            item = {
                 "id": ar["id"],
                 "rule_name": ar["rule_name"],
                 "rule_type": ar["rule_type"],
@@ -453,7 +486,16 @@ def api_list_vouchers():
                 "disposition_handler": ar["disposition_handler"],
                 "disposition_time": ar["disposition_time"],
                 "disposition_version": ar["disposition_version"],
-            })
+                "follow_up_deadline": ar["follow_up_deadline"],
+                "follow_up_assignee": ar["follow_up_assignee"],
+                "due_status": due_status,
+            }
+            if is_cashier:
+                for key in ("follow_up_deadline", "follow_up_assignee", "due_status",
+                            "rule_type", "reason",
+                            "disposition_handler", "disposition_time"):
+                    item.pop(key, None)
+            alert_map.setdefault(ar["voucher_no"], []).append(item)
 
     filtered_result = []
     for v in result:
@@ -528,6 +570,14 @@ def api_get_voucher(vid):
         (v["voucher_no"],)
     ).fetchall()
     alerts = get_voucher_alerts(db, v["voucher_no"])
+    is_cashier = current_user()["role"] == ROLE_CASHIER
+    for a in alerts:
+        a["due_status"] = compute_due_status(a.get("follow_up_deadline"))
+        if is_cashier:
+            for key in ("follow_up_deadline", "follow_up_assignee", "due_status",
+                        "rule_id", "rule_type", "alert_reason",
+                        "disposition_handler", "disposition_time"):
+                a.pop(key, None)
     return jsonify({
         "voucher": row_to_dict(v),
         "timeline": [row_to_dict(t) for t in tl],
@@ -766,11 +816,13 @@ def api_export_csv():
         placeholders = ",".join("?" * len(vnos))
         alert_rows = db.execute(f"""
             SELECT voucher_no, rule_name, alert_reason, disposition_status,
-                   disposition_note, disposition_handler, disposition_time
+                   disposition_note, disposition_handler, disposition_time,
+                   follow_up_deadline, follow_up_assignee
             FROM alert_logs WHERE voucher_no IN ({placeholders})
             ORDER BY id ASC
         """, vnos).fetchall()
         for ar in alert_rows:
+            due_s = compute_due_status(ar["follow_up_deadline"])
             alert_map.setdefault(ar["voucher_no"], []).append({
                 "rule_name": ar["rule_name"],
                 "alert_reason": ar["alert_reason"],
@@ -778,6 +830,9 @@ def api_export_csv():
                 "disposition_note": ar["disposition_note"],
                 "disposition_handler": ar["disposition_handler"],
                 "disposition_time": ar["disposition_time"],
+                "follow_up_deadline": ar["follow_up_deadline"] or "",
+                "follow_up_assignee": ar["follow_up_assignee"] or "",
+                "due_status": DUE_STATUS_LABELS.get(due_s, "") if due_s else "",
             })
 
     buf = io.StringIO()
@@ -787,7 +842,8 @@ def api_export_csv():
         "单据编号", "状态", "班次", "班次日期", "收银员", "差异金额",
         "原因", "备注", "创建人", "创建时间", "复核人", "关闭人",
         "退回说明", "关闭说明", "撤销人", "撤销时间", "关联原单", "导入来源",
-        "预警规则", "预警原因", "处置状态", "处置备注", "处理人", "处理时间"
+        "预警规则", "预警原因", "处置状态", "处置备注", "处理人", "处理时间",
+        "跟进截止日期", "跟进负责人", "到期状态"
     ])
     status_text = {
         STATUS_DRAFT: "草稿", STATUS_PENDING: "待复核", STATUS_REVIEWED: "复核通过",
@@ -803,7 +859,7 @@ def api_export_csv():
                 r["created_at"], r["reviewed_by"] or "", r["closed_by"] or "",
                 r["return_note"] or "", r["closed_note"] or "", r["revoked_by"] or "",
                 r["revoked_at"] or "", r["parent_voucher_no"] or "", r["import_source"] or "",
-                "", "", "", "", "", ""
+                "", "", "", "", "", "", "", "", ""
             ])
         else:
             for i, a in enumerate(alerts):
@@ -831,7 +887,10 @@ def api_export_csv():
                     DISP_STATUS_LABELS.get(a["disposition_status"], a["disposition_status"]),
                     a["disposition_note"] or "",
                     a["disposition_handler"] or "",
-                    a["disposition_time"] or ""
+                    a["disposition_time"] or "",
+                    a["follow_up_deadline"],
+                    a["follow_up_assignee"],
+                    a["due_status"],
                 ])
     output = buf.getvalue().encode("utf-8")
     resp = make_response(output)
@@ -1484,6 +1543,7 @@ def api_import_alert_rules_csv():
 def api_list_alert_logs():
     voucher_no = request.args.get("voucher_no") or ""
     disp_status = request.args.get("disposition_status") or ""
+    due_status_filter = request.args.get("due_status") or ""
     db = get_db()
     sql = "SELECT * FROM alert_logs WHERE 1=1"
     params = []
@@ -1495,7 +1555,20 @@ def api_list_alert_logs():
         params.append(disp_status)
     sql += " ORDER BY id DESC LIMIT 200"
     rows = db.execute(sql, params).fetchall()
-    return jsonify({"logs": [row_to_dict(r) for r in rows]})
+    logs = []
+    is_cashier = current_user()["role"] == ROLE_CASHIER
+    for r in rows:
+        d = row_to_dict(r)
+        d["due_status"] = compute_due_status(d.get("follow_up_deadline"))
+        if due_status_filter:
+            if d["due_status"] != due_status_filter:
+                continue
+        if is_cashier:
+            for key in ("follow_up_deadline", "follow_up_assignee", "due_status",
+                        "rule_id", "rule_type", "alert_reason"):
+                d.pop(key, None)
+        logs.append(d)
+    return jsonify({"logs": logs})
 
 
 @app.route("/api/alert-logs/<int:alert_id>/disposition", methods=["POST"])
@@ -1505,9 +1578,21 @@ def api_update_alert_disposition(alert_id):
     status = (data.get("disposition_status") or "").strip()
     note = (data.get("disposition_note") or "").strip()
     version = data.get("disposition_version")
+    follow_up_deadline = (data.get("follow_up_deadline") or "").strip() or None
+    follow_up_assignee = (data.get("follow_up_assignee") or "").strip() or None
 
     if status not in (DISP_UNPROCESSED, DISP_CONFIRMED, DISP_FOLLOW_UP, DISP_IGNORED):
         return jsonify({"error": f"无效的处置状态，可选：{','.join(DISP_STATUS_LABELS.keys())}"}), 400
+
+    if status == DISP_FOLLOW_UP:
+        if not follow_up_deadline:
+            return jsonify({"error": "处置为「需跟进」时必须填写跟进截止日期"}), 400
+        try:
+            date_type.fromisoformat(follow_up_deadline)
+        except (ValueError, TypeError):
+            return jsonify({"error": "跟进截止日期格式无效，应为 YYYY-MM-DD"}), 400
+        if not follow_up_assignee:
+            return jsonify({"error": "处置为「需跟进」时必须填写跟进负责人"}), 400
 
     user = current_user()
     db = get_db()
@@ -1525,12 +1610,20 @@ def api_update_alert_disposition(alert_id):
         }), 409
 
     new_version = int(alert["disposition_version"]) + 1
+
+    if status != DISP_FOLLOW_UP:
+        follow_up_deadline = None
+        follow_up_assignee = None
+
     cur.execute("""
         UPDATE alert_logs
         SET disposition_status = ?, disposition_note = ?, disposition_handler = ?,
-            disposition_time = datetime('now','localtime'), disposition_version = ?
+            disposition_time = datetime('now','localtime'), disposition_version = ?,
+            follow_up_deadline = ?, follow_up_assignee = ?
         WHERE id = ? AND disposition_version = ?
-    """, (status, note, user["username"], new_version, alert_id, alert["disposition_version"]))
+    """, (status, note, user["username"], new_version,
+          follow_up_deadline, follow_up_assignee,
+          alert_id, alert["disposition_version"]))
 
     if cur.rowcount == 0:
         cur.execute("SELECT * FROM alert_logs WHERE id = ?", (alert_id,))
@@ -1540,9 +1633,12 @@ def api_update_alert_disposition(alert_id):
             "current": row_to_dict(latest)
         }), 409
 
+    follow_info = ""
+    if status == DISP_FOLLOW_UP:
+        follow_info = f", 截止日期={follow_up_deadline}, 负责人={follow_up_assignee}"
     add_operation_log(cur, "更新预警处置", user["username"], user["role"],
                      f"预警ID={alert_id}, 状态={DISP_STATUS_LABELS.get(status, status)}, "
-                     f"单据={alert['voucher_no']}, 备注={note[:100] if note else '无'}")
+                     f"单据={alert['voucher_no']}, 备注={note[:100] if note else '无'}{follow_info}")
     db.commit()
 
     cur.execute("SELECT * FROM alert_logs WHERE id = ?", (alert_id,))
@@ -1557,13 +1653,29 @@ def api_batch_alert_disposition():
     items = data.get("items") or []
     status = (data.get("disposition_status") or "").strip()
     note = (data.get("disposition_note") or "").strip()
+    follow_up_deadline = (data.get("follow_up_deadline") or "").strip() or None
+    follow_up_assignee = (data.get("follow_up_assignee") or "").strip() or None
 
     BATCH_DISP_ALLOWED = (DISP_CONFIRMED, DISP_FOLLOW_UP, DISP_IGNORED)
     if status not in BATCH_DISP_ALLOWED:
         return jsonify({"error": f"批量处置仅支持：已确认、需跟进、已忽略"}), 400
 
+    if status == DISP_FOLLOW_UP:
+        if not follow_up_deadline:
+            return jsonify({"error": "批量处置为「需跟进」时必须填写跟进截止日期"}), 400
+        try:
+            date_type.fromisoformat(follow_up_deadline)
+        except (ValueError, TypeError):
+            return jsonify({"error": "跟进截止日期格式无效，应为 YYYY-MM-DD"}), 400
+        if not follow_up_assignee:
+            return jsonify({"error": "批量处置为「需跟进」时必须填写跟进负责人"}), 400
+
     if not items:
         return jsonify({"error": "未选择任何预警记录"}), 400
+
+    if status != DISP_FOLLOW_UP:
+        follow_up_deadline = None
+        follow_up_assignee = None
 
     user = current_user()
     db = get_db()
@@ -1610,9 +1722,12 @@ def api_batch_alert_disposition():
         cur.execute("""
             UPDATE alert_logs
             SET disposition_status = ?, disposition_note = ?, disposition_handler = ?,
-                disposition_time = datetime('now','localtime'), disposition_version = ?
+                disposition_time = datetime('now','localtime'), disposition_version = ?,
+                follow_up_deadline = ?, follow_up_assignee = ?
             WHERE id = ? AND disposition_version = ?
-        """, (status, note, user["username"], new_version, alert_id, alert["disposition_version"]))
+        """, (status, note, user["username"], new_version,
+              follow_up_deadline, follow_up_assignee,
+              alert_id, alert["disposition_version"]))
 
         if cur.rowcount == 0:
             cur.execute("SELECT * FROM alert_logs WHERE id = ?", (alert_id,))
@@ -1635,9 +1750,12 @@ def api_batch_alert_disposition():
             "alert": row_to_dict(updated)
         })
 
+        follow_info = ""
+        if status == DISP_FOLLOW_UP:
+            follow_info = f", 截止日期={follow_up_deadline}, 负责人={follow_up_assignee}"
         add_operation_log(cur, "批量更新预警处置", user["username"], user["role"],
                          f"预警ID={alert_id}, 状态={DISP_STATUS_LABELS.get(status, status)}, "
-                         f"单据={alert['voucher_no']}, 备注={note[:100] if note else '无'}")
+                         f"单据={alert['voucher_no']}, 备注={note[:100] if note else '无'}{follow_info}")
 
     db.commit()
 
