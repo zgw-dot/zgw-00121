@@ -1,0 +1,692 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>门店交接班差异登记工具</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:"Microsoft YaHei","PingFang SC",sans-serif;background:#f0f2f5;color:#1f2937;min-height:100vh}
+.header{background:linear-gradient(135deg,#1e3a8a,#2563eb);color:#fff;padding:16px 32px;display:flex;justify-content:space-between;align-items:center;box-shadow:0 2px 8px rgba(0,0,0,.1)}
+.header h1{font-size:20px;font-weight:600}
+.user-info{display:flex;align-items:center;gap:12px;font-size:14px}
+.role-tag{background:rgba(255,255,255,.2);padding:3px 10px;border-radius:12px;font-size:12px}
+.btn{padding:7px 16px;border:none;border-radius:6px;cursor:pointer;font-size:14px;transition:all .2s;font-weight:500}
+.btn:hover{opacity:.85;transform:translateY(-1px)}
+.btn-sm{padding:4px 10px;font-size:12px}
+.btn-primary{background:#2563eb;color:#fff}
+.btn-success{background:#059669;color:#fff}
+.btn-danger{background:#dc2626;color:#fff}
+.btn-warning{background:#d97706;color:#fff}
+.btn-gray{background:#6b7280;color:#fff}
+.btn-outline{background:transparent;border:1px solid #2563eb;color:#2563eb}
+.btn-outline:hover{background:#eff6ff}
+.container{max-width:1400px;margin:0 auto;padding:24px}
+.login-wrap{min-height:100vh;display:flex;align-items:center;justify-content:center;background:linear-gradient(135deg,#1e3a8a 0%,#06b6d4 100%)}
+.login-box{background:#fff;padding:40px;border-radius:16px;box-shadow:0 20px 60px rgba(0,0,0,.2);width:400px}
+.login-box h2{text-align:center;color:#1e3a8a;margin-bottom:8px}
+.login-box .subtitle{text-align:center;color:#6b7280;font-size:13px;margin-bottom:24px}
+.form-group{margin-bottom:16px}
+.form-group label{display:block;font-size:13px;color:#374151;margin-bottom:6px;font-weight:500}
+.form-group input,.form-group select,.form-group textarea{width:100%;padding:10px 12px;border:1px solid #d1d5db;border-radius:6px;font-size:14px;font-family:inherit;transition:border .2s;outline:none}
+.form-group input:focus,.form-group select:focus,.form-group textarea:focus{border-color:#2563eb;box-shadow:0 0 0 3px rgba(37,99,235,.1)}
+.form-group textarea{resize:vertical;min-height:70px}
+.summary{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:16px;margin-bottom:24px}
+.stat-card{background:#fff;padding:20px;border-radius:12px;box-shadow:0 2px 8px rgba(0,0,0,.05);border-left:4px solid #2563eb}
+.stat-card h3{font-size:13px;color:#6b7280;margin-bottom:8px;font-weight:500}
+.stat-card .num{font-size:28px;font-weight:700;color:#111827}
+.stat-card .hint{font-size:12px;color:#9ca3af;margin-top:4px}
+.stat-card.warn{border-left-color:#f59e0b}
+.stat-card.warn .num{color:#b45309}
+.stat-card.ok{border-left-color:#10b981}
+.stat-card.ok .num{color:#047857}
+.stat-card.red{border-left-color:#ef4444}
+.stat-card.red .num{color:#b91c1c}
+.toolbar{background:#fff;padding:16px;border-radius:12px;box-shadow:0 2px 8px rgba(0,0,0,.05);margin-bottom:16px;display:flex;flex-wrap:wrap;gap:12px;align-items:flex-end}
+.toolbar .form-group{margin:0;min-width:160px}
+.toolbar .spacer{flex:1}
+.table-wrap{background:#fff;border-radius:12px;box-shadow:0 2px 8px rgba(0,0,0,.05);overflow:hidden}
+table{width:100%;border-collapse:collapse;font-size:13px}
+thead{background:#f8fafc;border-bottom:2px solid #e5e7eb}
+th{text-align:left;padding:14px 12px;color:#374151;font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:.5px;white-space:nowrap}
+td{padding:12px;border-bottom:1px solid #f3f4f6;color:#4b5563}
+tbody tr:hover{background:#f9fafb}
+.status{display:inline-block;padding:3px 10px;border-radius:12px;font-size:11px;font-weight:600}
+.status-draft{background:#e5e7eb;color:#374151}
+.status-pending{background:#fef3c7;color:#92400e}
+.status-reviewed{background:#dbeafe;color:#1e40af}
+.status-returned{background:#fee2e2;color:#991b1b}
+.status-closed{background:#d1fae5;color:#065f46}
+.status-revoked{background:#e9d5ff;color:#6b21a8}
+.amount{font-weight:600;font-family:"Consolas",monospace}
+.amount.neg{color:#dc2626}
+.amount.pos{color:#059669}
+.actions{display:flex;gap:6px;flex-wrap:wrap}
+.modal-mask{position:fixed;inset:0;background:rgba(0,0,0,.5);display:none;align-items:center;justify-content:center;z-index:1000;padding:20px}
+.modal-mask.show{display:flex}
+.modal{background:#fff;border-radius:12px;width:100%;max-width:700px;max-height:90vh;overflow-y:auto;box-shadow:0 25px 50px rgba(0,0,0,.25)}
+.modal-header{padding:20px 24px;border-bottom:1px solid #e5e7eb;display:flex;justify-content:space-between;align-items:center}
+.modal-header h2{font-size:18px;color:#111827}
+.modal-body{padding:24px}
+.modal-footer{padding:16px 24px;border-top:1px solid #e5e7eb;display:flex;justify-content:flex-end;gap:10px}
+.timeline{background:#f9fafb;border-radius:8px;padding:16px;margin-top:16px}
+.timeline h4{font-size:14px;color:#374151;margin-bottom:12px}
+.timeline-item{padding:10px 0 10px 24px;border-left:2px solid #d1d5db;position:relative;font-size:13px;color:#4b5563}
+.timeline-item:last-child{border-left-color:transparent}
+.timeline-item::before{content:"";position:absolute;left:-6px;top:13px;width:10px;height:10px;border-radius:50%;background:#2563eb}
+.timeline-item .tl-time{color:#9ca3af;font-size:12px}
+.timeline-item .tl-act{color:#111827;font-weight:600}
+.timeline-item .tl-detail{margin-top:4px;color:#6b7280}
+.empty{text-align:center;padding:60px 20px;color:#9ca3af}
+.alert{padding:12px 16px;border-radius:8px;margin-bottom:16px;font-size:14px}
+.alert-danger{background:#fef2f2;border:1px solid #fecaca;color:#991b1b}
+.alert-success{background:#ecfdf5;border:1px solid #a7f3d0;color:#065f46}
+.alert-info{background:#eff6ff;border:1px solid #bfdbfe;color:#1e40af}
+.close-x{cursor:pointer;font-size:22px;color:#9ca3af;background:none;border:none;padding:0 6px}
+.close-x:hover{color:#374151}
+.file-upload{display:flex;gap:8px;align-items:center}
+.file-upload input[type=file]{padding:8px;border:1px dashed #d1d5db;border-radius:6px;background:#fff;flex:1}
+.badge{background:#ef4444;color:#fff;padding:2px 6px;border-radius:8px;font-size:10px;vertical-align:middle;margin-left:4px}
+.row{display:grid;grid-template-columns:repeat(2,1fr);gap:16px}
+.voucher-info{background:#f8fafc;border-radius:8px;padding:16px;margin-bottom:16px;font-size:13px;line-height:1.8}
+.voucher-info .label{color:#6b7280;display:inline-block;width:100px}
+.hidden{display:none}
+@media(max-width:768px){.row{grid-template-columns:1fr}.toolbar .form-group{min-width:100%}}
+</style>
+</head>
+<body>
+{% if user %}
+<div id="app">
+  <div class="header">
+    <h1>🏪 门店交接班差异登记工具</h1>
+    <div class="user-info">
+      <span>{{ user.display_name }}</span>
+      <span class="role-tag" id="roleTag">{{ {'admin':'管理员','manager':'值班长','cashier':'收银员'}[user.role] }}</span>
+      <button class="btn btn-sm btn-outline" style="color:#fff;border-color:rgba(255,255,255,.5)" onclick="logout()">退出</button>
+    </div>
+  </div>
+  <div class="container">
+    <div class="summary" id="summary"></div>
+    <div class="toolbar">
+      <div class="form-group">
+        <label>班次筛选</label>
+        <select id="filterShift"><option value="">全部班次</option></select>
+      </div>
+      <div class="form-group">
+        <label>处理人</label>
+        <select id="filterHandler"><option value="">全部</option></select>
+      </div>
+      <div class="form-group">
+        <label>状态</label>
+        <select id="filterStatus">
+          <option value="">全部</option>
+          <option value="draft">草稿</option>
+          <option value="pending">待复核</option>
+          <option value="reviewed">复核通过</option>
+          <option value="returned">已退回</option>
+          <option value="closed">已关闭</option>
+          <option value="revoked">已撤销</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label>关键词</label>
+        <input id="filterKeyword" placeholder="单号/收银员/备注">
+      </div>
+      <div class="form-group">
+        <button class="btn btn-gray btn-sm" onclick="loadVouchers()">查询</button>
+      </div>
+      <div class="spacer"></div>
+      {% if user.role in ['cashier','admin','manager'] %}
+      <button class="btn btn-primary" onclick="openCreate()">＋ 新建单据</button>
+      {% endif %}
+      <button class="btn btn-success btn-outline" onclick="exportCSV()">导出 CSV</button>
+      {% if user.role in ['admin','manager','cashier'] %}
+      <button class="btn btn-warning" onclick="document.getElementById('importFile').click()">导入 CSV</button>
+      <input id="importFile" type="file" accept=".csv" class="hidden" onchange="importCSV(this)">
+      {% endif %}
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>单据编号</th>
+            <th>班次</th>
+            <th>班次日期</th>
+            <th>收银员</th>
+            <th>差异金额</th>
+            <th>原因</th>
+            <th>状态</th>
+            <th>创建人</th>
+            <th>操作时间</th>
+            <th>操作</th>
+          </tr>
+        </thead>
+        <tbody id="voucherList"></tbody>
+      </table>
+      <div id="emptyTip" class="empty hidden">暂无数据</div>
+    </div>
+  </div>
+</div>
+
+<div class="modal-mask" id="createModal">
+  <div class="modal">
+    <div class="modal-header">
+      <h2 id="createTitle">新建差异登记单</h2>
+      <button class="close-x" onclick="closeModal('createModal')">×</button>
+    </div>
+    <div class="modal-body">
+      <div id="createAlert"></div>
+      <div class="row">
+        <div class="form-group">
+          <label>班次 <span style="color:#ef4444">*</span></label>
+          <select id="fShift"></select>
+        </div>
+        <div class="form-group">
+          <label>班次日期 <span style="color:#ef4444">*</span></label>
+          <input id="fDate" type="date">
+        </div>
+        <div class="form-group">
+          <label>收银员 <span style="color:#ef4444">*</span></label>
+          <input id="fCashier" placeholder="请输入收银员姓名">
+        </div>
+        <div class="form-group">
+          <label>差异金额(元) <span style="color:#ef4444">*</span></label>
+          <input id="fAmount" type="number" step="0.01" placeholder="正数=长款，负数=短款">
+        </div>
+        <div class="form-group" style="grid-column:span 2">
+          <label>原因(短款必填)</label>
+          <input id="fReason" placeholder="负金额必须填写原因">
+        </div>
+        <div class="form-group" style="grid-column:span 2">
+          <label>备注/凭证说明</label>
+          <textarea id="fRemark" placeholder="凭证编号、调整说明等"></textarea>
+        </div>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-gray" onclick="closeModal('createModal')">取消</button>
+      <button class="btn btn-outline" onclick="submitForm('draft')">保存草稿</button>
+      <button class="btn btn-primary" onclick="submitForm('submit')">提交复核</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal-mask" id="detailModal">
+  <div class="modal" style="max-width:820px">
+    <div class="modal-header">
+      <h2>单据详情</h2>
+      <button class="close-x" onclick="closeModal('detailModal')">×</button>
+    </div>
+    <div class="modal-body">
+      <div id="detailAlert"></div>
+      <div id="detailContent"></div>
+      <div id="detailActions"></div>
+      <div id="detailTimeline"></div>
+    </div>
+  </div>
+</div>
+
+<div class="modal-mask" id="reviewModal">
+  <div class="modal">
+    <div class="modal-header">
+      <h2 id="reviewTitle">复核处理</h2>
+      <button class="close-x" onclick="closeModal('reviewModal')">×</button>
+    </div>
+    <div class="modal-body">
+      <div id="reviewAlert"></div>
+      <div class="form-group">
+        <label id="reviewLabel">处理说明</label>
+        <textarea id="reviewNote" placeholder="请填写处理说明..."></textarea>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-gray" onclick="closeModal('reviewModal')">取消</button>
+      <button class="btn btn-danger" id="btnReturn" onclick="doReview('return')">退回</button>
+      <button class="btn btn-success" id="btnApprove" onclick="doReview('approve')">复核通过</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal-mask" id="revokeModal">
+  <div class="modal">
+    <div class="modal-header">
+      <h2>撤销单据</h2>
+      <button class="close-x" onclick="closeModal('revokeModal')">×</button>
+    </div>
+    <div class="modal-body">
+      <div class="alert alert-danger">撤销后原单据不可修改，系统将生成新的草稿供更正，历史会完整保留。</div>
+      <div class="form-group">
+        <label>撤销原因 <span style="color:#ef4444">*</span></label>
+        <textarea id="revokeReason" placeholder="请填写撤销原因..."></textarea>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-gray" onclick="closeModal('revokeModal')">取消</button>
+      <button class="btn btn-danger" onclick="doRevoke()">确认撤销</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal-mask" id="closeModal">
+  <div class="modal">
+    <div class="modal-header">
+      <h2>关闭单据</h2>
+      <button class="close-x" onclick="closeModal('closeModal')">×</button>
+    </div>
+    <div class="modal-body">
+      <div class="form-group">
+        <label>关闭说明</label>
+        <textarea id="closeNote" placeholder="可选，填写处理结果说明..."></textarea>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-gray" onclick="closeModal('closeModal')">取消</button>
+      <button class="btn btn-success" onclick="doClose()">确认关闭</button>
+    </div>
+  </div>
+</div>
+
+{% else %}
+<div class="login-wrap">
+  <div class="login-box">
+    <h2>🏪 门店交接班差异登记</h2>
+    <div class="subtitle">请使用您的账号登录系统</div>
+    <div id="loginAlert"></div>
+    <div class="form-group">
+      <label>用户名</label>
+      <input id="loginUser" placeholder="admin / manager / cashier">
+    </div>
+    <div class="form-group">
+      <label>密码</label>
+      <input id="loginPass" type="password" placeholder="请输入密码" onkeypress="if(event.key==='Enter')doLogin()">
+    </div>
+    <button class="btn btn-primary" style="width:100%;padding:12px;margin-top:8px" onclick="doLogin()">登 录</button>
+    <div style="margin-top:20px;padding:12px;background:#f8fafc;border-radius:8px;font-size:12px;color:#6b7280;line-height:1.8">
+      <div style="font-weight:600;color:#374151;margin-bottom:6px">默认账号：</div>
+      <div>管理员 admin / admin123</div>
+      <div>值班长 manager / manager123</div>
+      <div>收银员 cashier / cashier123</div>
+      <div>收银员 cashier2 / cashier123</div>
+    </div>
+  </div>
+</div>
+{% endif %}
+
+<script>
+const USER = {{ user | tojson if user else 'null' }};
+const ROLE = USER ? USER.role : null;
+const STATUS_TEXT = {
+  draft:'草稿', pending:'待复核', reviewed:'复核通过',
+  returned:'已退回', closed:'已关闭', revoked:'已撤销'
+};
+let editingId = null;
+let currentVoucher = null;
+let tempReviewVid = null;
+let tempAction = null;
+let tempRevokeVid = null;
+let tempCloseVid = null;
+
+async function api(url, opt={}) {
+  const o = Object.assign({headers:{'Content-Type':'application/json'}, credentials:'same-origin'}, opt);
+  if(o.body && typeof o.body === 'object' && !(o.body instanceof FormData)){
+    o.body = JSON.stringify(o.body);
+  }
+  const r = await fetch(url, o);
+  const d = await r.json().catch(()=>({error:'请求失败'}));
+  if(!r.ok || d.error){
+    return {ok:false, error:d.error || ('HTTP '+r.status), status:r.status, data:d};
+  }
+  return {ok:true, data:d};
+}
+
+{% if user %}
+async function doLogin(){}
+async function logout(){
+  await api('/api/logout', {method:'POST'});
+  location.reload();
+}
+
+async function init() {
+  const [sum, sh, v] = await Promise.all([
+    api('/api/summary'),
+    api('/api/shifts'),
+    api('/api/vouchers')
+  ]);
+  renderSummary(sum.data);
+  const shifts = sh.data.shifts;
+  const shiftSel = document.getElementById('filterShift');
+  const shiftSel2 = document.getElementById('fShift');
+  shifts.forEach(s=>{
+    shiftSel.innerHTML += `<option value="${s.code}">${s.code} ${s.description||''}</option>`;
+    shiftSel2.innerHTML += `<option value="${s.code}">${s.code} ${s.description||''}</option>`;
+  });
+  const hSel = document.getElementById('filterHandler');
+  (v.data.handlers||[]).forEach(h=>{
+    hSel.innerHTML += `<option value="${h.username}">${h.display_name||h.username} (${h.username})</option>`;
+  });
+  document.getElementById('fDate').valueAsDate = new Date();
+  renderList(v.data.vouchers);
+  ['filterShift','filterHandler','filterStatus','filterKeyword'].forEach(id=>{
+    document.getElementById(id).addEventListener('change', loadVouchers);
+    document.getElementById(id).addEventListener('keypress', e=>{if(e.key==='Enter')loadVouchers()});
+  });
+}
+
+function renderSummary(d){
+  const map = d.status_map || {};
+  function cell(status, label, cls, hint){
+    const c = map[status] || {count:0, total:0};
+    return `<div class="stat-card ${cls||''}"><h3>${label}</h3>
+      <div class="num">${c.count} 单 / ¥${c.total.toFixed(2)}</div>
+      <div class="hint">${hint||''}</div></div>`;
+  }
+  document.getElementById('summary').innerHTML =
+    cell('pending','待复核', 'warn', '等待值班长处理') +
+    `<div class="stat-card ok"><h3>未结数量</h3><div class="num">${d.open_count} 单</div><div class="hint">含草稿/待复核/退回/复核通过</div></div>` +
+    cell('reviewed','复核通过', '', '待关闭或调整') +
+    cell('closed','已关闭', '', '处理完成的单据') +
+    cell('returned','已退回', 'red', '收银员需补充后重提') +
+    cell('revoked','已撤销', '', '撤销保留历史');
+}
+
+function renderList(list){
+  const tb = document.getElementById('voucherList');
+  tb.innerHTML = '';
+  document.getElementById('emptyTip').classList.toggle('hidden', list.length>0);
+  list.forEach(v=>{
+    const amtCls = v.diff_amount<0?'neg':(v.diff_amount>0?'pos':'');
+    const act = buildActions(v);
+    tb.innerHTML += `<tr>
+      <td style="font-weight:600;color:#111827;cursor:pointer" onclick="openDetail(${v.id})">${v.voucher_no}</td>
+      <td>${v.shift_code}</td>
+      <td>${v.shift_date}</td>
+      <td>${v.cashier}</td>
+      <td class="amount ${amtCls}">¥${Number(v.diff_amount).toFixed(2)}</td>
+      <td style="max-width:180px;overflow:hidden;text-overflow:ellipsis" title="${v.reason||''}">${v.reason||'<span style="color:#d1d5db">—</span>'}</td>
+      <td><span class="status status-${v.status}">${STATUS_TEXT[v.status]||v.status}</span></td>
+      <td>${v.created_by}</td>
+      <td style="font-size:12px;color:#9ca3af">${v.updated_at}</td>
+      <td class="actions">${act}</td>
+    </tr>`;
+  });
+}
+
+function buildActions(v){
+  const btns = [`<button class="btn btn-sm btn-outline" onclick="openDetail(${v.id})">详情</button>`];
+  const isOwner = v.created_by === USER.username;
+  const isMgr = ['admin','manager'].includes(ROLE);
+  if(v.status==='draft' && (isOwner || isMgr)){
+    btns.push(`<button class="btn btn-sm btn-primary" onclick="editAndSubmit(${v.id})">提交</button>`);
+  }
+  if(v.status==='pending' && isMgr){
+    btns.push(`<button class="btn btn-sm btn-success" onclick="openReview(${v.id},'approve')">复核通过</button>`);
+    btns.push(`<button class="btn btn-sm btn-danger" onclick="openReview(${v.id},'return')">退回</button>`);
+  }
+  if((v.status==='reviewed' || v.status==='pending') && isMgr){
+    btns.push(`<button class="btn btn-sm btn-success" onclick="openClose(${v.id})">关闭</button>`);
+  }
+  if(v.status==='returned' && (isOwner || isMgr)){
+    btns.push(`<button class="btn btn-sm btn-primary" onclick="editAndSubmit(${v.id})">重新提交</button>`);
+  }
+  if(v.status!=='closed' && v.status!=='revoked' && isMgr){
+    btns.push(`<button class="btn btn-sm btn-warning" onclick="openRevoke(${v.id})">撤销</button>`);
+  }
+  return btns.join('');
+}
+
+async function loadVouchers(){
+  const params = new URLSearchParams({
+    shift_code: document.getElementById('filterShift').value,
+    handler: document.getElementById('filterHandler').value,
+    status: document.getElementById('filterStatus').value,
+    keyword: document.getElementById('filterKeyword').value
+  }).toString();
+  const r = await api('/api/vouchers?'+params);
+  if(r.ok) renderList(r.data.vouchers);
+  const s = await api('/api/summary');
+  if(s.ok) renderSummary(s.data);
+}
+
+function showAlert(id, msg, type='info'){
+  const el = document.getElementById(id);
+  el.className = 'alert alert-'+type;
+  el.textContent = msg;
+  el.classList.remove('hidden');
+  setTimeout(()=>{el.classList.add('hidden');el.textContent='';},5000);
+}
+
+function openModal(id){ document.getElementById(id).classList.add('show'); }
+function closeModal(id){ document.getElementById(id).classList.remove('show'); }
+
+function openCreate(){
+  editingId = null;
+  currentVoucher = null;
+  document.getElementById('createTitle').textContent = '新建差异登记单';
+  ['fCashier','fAmount','fReason','fRemark'].forEach(i=>document.getElementById(i).value='');
+  document.getElementById('fDate').valueAsDate = new Date();
+  document.getElementById('createAlert').classList.add('hidden');
+  openModal('createModal');
+}
+
+async function editAndSubmit(vid){
+  const r = await api('/api/vouchers/'+vid);
+  if(!r.ok){ alert(r.error); return; }
+  currentVoucher = r.data.voucher;
+  editingId = vid;
+  document.getElementById('createTitle').textContent = '编辑并提交单据 ' + currentVoucher.voucher_no;
+  document.getElementById('fShift').value = currentVoucher.shift_code;
+  document.getElementById('fDate').value = currentVoucher.shift_date;
+  document.getElementById('fCashier').value = currentVoucher.cashier;
+  document.getElementById('fAmount').value = currentVoucher.diff_amount;
+  document.getElementById('fReason').value = currentVoucher.reason||'';
+  document.getElementById('fRemark').value = currentVoucher.remark||'';
+  if(currentVoucher.status==='returned'){
+    showAlert('createAlert','此单据已被退回：' + (currentVoucher.return_note||'') + '，请补充后重新提交。','danger');
+  } else {
+    document.getElementById('createAlert').classList.add('hidden');
+  }
+  openModal('createModal');
+}
+
+async function submitForm(mode){
+  const data = {
+    shift_code: document.getElementById('fShift').value,
+    shift_date: document.getElementById('fDate').value,
+    cashier: document.getElementById('fCashier').value.trim(),
+    diff_amount: document.getElementById('fAmount').value,
+    reason: document.getElementById('fReason').value.trim(),
+    remark: document.getElementById('fRemark').value.trim()
+  };
+  if(editingId){
+    const url = `/api/vouchers/${editingId}/submit`;
+    const r = await api(url, {method:'POST', body:data});
+    if(!r.ok){ showAlert('createAlert', r.error, 'danger'); return; }
+    if(mode==='submit'){
+      closeModal('createModal');
+      alert('提交成功，等待值班长复核');
+      loadVouchers();
+    }
+  } else {
+    const r = await api('/api/vouchers', {method:'POST', body:data});
+    if(!r.ok){ showAlert('createAlert', r.error, 'danger'); return; }
+    editingId = r.data.id;
+    if(mode==='submit'){
+      const r2 = await api(`/api/vouchers/${editingId}/submit`, {method:'POST', body:data});
+      if(!r2.ok){ showAlert('createAlert', r2.error, 'danger'); return; }
+      closeModal('createModal');
+      alert('单据已创建并提交复核，单号：'+r.data.voucher_no);
+      loadVouchers();
+    } else {
+      closeModal('createModal');
+      alert('草稿已保存：'+r.data.voucher_no);
+      loadVouchers();
+    }
+  }
+}
+
+async function openDetail(vid){
+  const r = await api('/api/vouchers/'+vid);
+  if(!r.ok){ alert(r.error); return; }
+  currentVoucher = r.data.voucher;
+  const v = currentVoucher;
+  const amtCls = v.diff_amount<0?'neg':'pos';
+  document.getElementById('detailContent').innerHTML = `
+    <div class="voucher-info">
+      <div><span class="label">单据编号:</span><b>${v.voucher_no}</b>
+        <span class="status status-${v.status}" style="margin-left:12px">${STATUS_TEXT[v.status]}</span>
+      </div>
+      <div><span class="label">关联原单:</span>${v.parent_voucher_no||'无'}</div>
+      <div><span class="label">班 次:</span>${v.shift_code} / ${v.shift_date}</div>
+      <div><span class="label">收银员:</span>${v.cashier}</div>
+      <div><span class="label">差异金额:</span><span class="amount ${amtCls}">¥${Number(v.diff_amount).toFixed(2)}</span></div>
+      <div><span class="label">原 因:</span>${v.reason||'<span style="color:#9ca3af">无</span>'}</div>
+      <div><span class="label">备 注:</span>${v.remark||'<span style="color:#9ca3af">无</span>'}</div>
+      <div><span class="label">创建人:</span>${v.created_by} @ ${v.created_at}</div>
+      <div><span class="label">复核人:</span>${v.reviewed_by||'—'}</div>
+      <div><span class="label">关闭人:</span>${v.closed_by||'—'} ${v.closed_note?'('+v.closed_note+')':''}</div>
+      <div><span class="label">撤销人:</span>${v.revoked_by||'—'} ${v.revoked_at?'@ '+v.revoked_at:''}</div>
+      <div><span class="label">退回说明:</span>${v.return_note||'—'}</div>
+      <div><span class="label">更新时间:</span>${v.updated_at}</div>
+    </div>
+  `;
+  let acts = '';
+  const isMgr = ['admin','manager'].includes(ROLE);
+  const isOwner = v.created_by===USER.username;
+  acts += '<div style="display:flex;gap:8px;margin-bottom:8px;flex-wrap:wrap">';
+  if((v.status==='draft'||v.status==='returned') && (isOwner||isMgr)){
+    acts += `<button class="btn btn-sm btn-primary" onclick="closeModal('detailModal');editAndSubmit(${v.id})">编辑/提交</button>`;
+  }
+  if(v.status==='pending' && isMgr){
+    acts += `<button class="btn btn-sm btn-success" onclick="closeModal('detailModal');openReview(${v.id},'approve')">复核通过</button>`;
+    acts += `<button class="btn btn-sm btn-danger" onclick="closeModal('detailModal');openReview(${v.id},'return')">退回</button>`;
+  }
+  if((v.status==='reviewed'||v.status==='pending') && isMgr){
+    acts += `<button class="btn btn-sm btn-success" onclick="closeModal('detailModal');openClose(${v.id})">关闭单据</button>`;
+  }
+  if(v.status!=='closed' && v.status!=='revoked' && isMgr){
+    acts += `<button class="btn btn-sm btn-warning" onclick="closeModal('detailModal');openRevoke(${v.id})">撤销单据</button>`;
+  }
+  acts += '</div>';
+  document.getElementById('detailActions').innerHTML = acts;
+
+  const tl = r.data.timeline || [];
+  let tlHtml = '<div class="timeline"><h4>📜 操作时间线</h4>';
+  if(tl.length===0){
+    tlHtml += '<div style="color:#9ca3af;font-size:13px">暂无记录</div>';
+  } else {
+    tl.forEach(t=>{
+      tlHtml += `<div class="timeline-item">
+        <div><span class="tl-time">${t.created_at}</span>
+        <span style="margin-left:8px;color:#6b7280">[${t.actor||''}${t.actor_role?'/'+t.actor_role:''}]</span>
+        <span class="tl-act" style="margin-left:8px">${t.action}</span></div>
+        <div class="tl-detail">${t.detail||''}</div>
+      </div>`;
+    });
+  }
+  tlHtml += '</div>';
+  document.getElementById('detailTimeline').innerHTML = tlHtml;
+  openModal('detailModal');
+}
+
+function openReview(vid, action){
+  tempReviewVid = vid;
+  tempAction = action;
+  document.getElementById('reviewTitle').textContent = action==='approve'?'复核通过':'退回单据';
+  document.getElementById('reviewLabel').textContent = action==='approve'?'复核说明(可选)':'退回说明 *';
+  document.getElementById('reviewNote').value = '';
+  document.getElementById('btnReturn').style.display = action==='return'?'inline-block':'none';
+  document.getElementById('btnApprove').style.display = action==='approve'?'inline-block':'none';
+  document.getElementById('reviewAlert').classList.add('hidden');
+  openModal('reviewModal');
+}
+
+async function doReview(action){
+  const note = document.getElementById('reviewNote').value.trim();
+  if(action==='return' && !note){
+    showAlert('reviewAlert','退回必须填写说明','danger'); return;
+  }
+  const r = await api(`/api/vouchers/${tempReviewVid}/review`, {
+    method:'POST', body:{action, note}
+  });
+  if(!r.ok){ showAlert('reviewAlert', r.error, 'danger'); return; }
+  closeModal('reviewModal');
+  alert(action==='approve'?'复核通过':'已退回');
+  loadVouchers();
+}
+
+function openClose(vid){
+  tempCloseVid = vid;
+  document.getElementById('closeNote').value = '';
+  openModal('closeModal');
+}
+async function doClose(){
+  const note = document.getElementById('closeNote').value.trim();
+  const r = await api(`/api/vouchers/${tempCloseVid}/close`, {
+    method:'POST', body:{note}
+  });
+  if(!r.ok){ alert(r.error); return; }
+  closeModal('closeModal');
+  alert('已关闭');
+  loadVouchers();
+}
+
+function openRevoke(vid){
+  tempRevokeVid = vid;
+  document.getElementById('revokeReason').value = '';
+  openModal('revokeModal');
+}
+async function doRevoke(){
+  const reason = document.getElementById('revokeReason').value.trim();
+  if(!reason){ alert('请填写撤销原因'); return; }
+  const r = await api(`/api/vouchers/${tempRevokeVid}/revoke`, {
+    method:'POST', body:{reason}
+  });
+  if(!r.ok){ alert(r.error); return; }
+  closeModal('revokeModal');
+  alert('已撤销，已生成新草稿：'+r.data.new_voucher_no);
+  loadVouchers();
+}
+
+function exportCSV(){
+  location.href = '/api/vouchers/export.csv';
+}
+
+async function importCSV(input){
+  const file = input.files[0];
+  if(!file) return;
+  const fd = new FormData();
+  fd.append('file', file);
+  try{
+    const r = await fetch('/api/vouchers/import', {method:'POST', body:fd, credentials:'same-origin'});
+    const d = await r.json();
+    input.value='';
+    if(!r.ok || d.error){
+      alert('导入失败：'+(d.error||'HTTP '+r.status));
+      return;
+    }
+    let msg = `导入完成：共${d.total}条，成功${d.success}条，失败${d.failed}条。`;
+    if(d.errors && d.errors.length){
+      msg += '\n\n错误明细：\n' + d.errors.slice(0,20).join('\n');
+    }
+    alert(msg);
+    loadVouchers();
+  }catch(e){
+    alert('导入异常：'+e.message);
+    input.value='';
+  }
+}
+
+init();
+{% else %}
+async function doLogin(){
+  const u = document.getElementById('loginUser').value.trim();
+  const p = document.getElementById('loginPass').value;
+  if(!u||!p){ showAlert('loginAlert','请输入用户名和密码','danger'); return; }
+  const r = await api('/api/login', {method:'POST', body:{username:u, password:p}});
+  if(!r.ok){ showAlert('loginAlert', r.error, 'danger'); return; }
+  location.reload();
+}
+{% endif %}
+</script>
+</body>
+</html>

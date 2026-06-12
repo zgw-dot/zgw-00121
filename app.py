@@ -1,0 +1,809 @@
+import os
+import csv
+import io
+import secrets
+import sqlite3
+from datetime import datetime
+from functools import wraps
+from pathlib import Path
+
+from flask import (
+    Flask, request, jsonify, g, send_file,
+    render_template_string, make_response, session
+)
+
+APP_DIR = Path(__file__).parent
+DATA_DIR = APP_DIR / "data"
+DATA_DIR.mkdir(exist_ok=True)
+DB_PATH = DATA_DIR / "shift_diff.db"
+
+ROLE_CASHIER = "cashier"
+ROLE_MANAGER = "manager"
+ROLE_ADMIN = "admin"
+
+STATUS_DRAFT = "draft"
+STATUS_PENDING = "pending"
+STATUS_REVIEWED = "reviewed"
+STATUS_RETURNED = "returned"
+STATUS_CLOSED = "closed"
+STATUS_REVOKED = "revoked"
+
+DEFAULT_USERS = [
+    {"username": "admin",   "password": "admin123",  "role": ROLE_ADMIN,   "display_name": "系统管理员"},
+    {"username": "manager", "password": "manager123","role": ROLE_MANAGER, "display_name": "值班长"},
+    {"username": "cashier", "password": "cashier123","role": ROLE_CASHIER, "display_name": "收银员小张"},
+    {"username": "cashier2","password": "cashier123","role": ROLE_CASHIER, "display_name": "收银员小李"},
+]
+
+app = Flask(__name__, static_folder="static")
+app.config["SECRET_KEY"] = "shift-diff-app-secret-key-change-me"
+app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
+
+
+# ---------- DB helpers ---------- #
+
+def get_db():
+    if "db" not in g:
+        conn = sqlite3.connect(str(DB_PATH))
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA foreign_keys = ON")
+        g.db = conn
+    return g.db
+
+
+@app.teardown_appcontext
+def close_db(exc):
+    db = g.pop("db", None)
+    if db is not None:
+        db.close()
+
+
+def init_db():
+    con = sqlite3.connect(str(DB_PATH))
+    cur = con.cursor()
+    cur.executescript("""
+    CREATE TABLE IF NOT EXISTS users (
+        username TEXT PRIMARY KEY,
+        password TEXT NOT NULL,
+        role TEXT NOT NULL,
+        display_name TEXT,
+        created_at TEXT DEFAULT (datetime('now','localtime'))
+    );
+
+    CREATE TABLE IF NOT EXISTS vouchers (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        voucher_no TEXT UNIQUE NOT NULL,
+        shift_code TEXT NOT NULL,
+        shift_date TEXT NOT NULL,
+        cashier TEXT NOT NULL,
+        diff_amount REAL NOT NULL DEFAULT 0,
+        reason TEXT,
+        remark TEXT,
+        status TEXT NOT NULL DEFAULT 'draft',
+        current_handler TEXT,
+        created_by TEXT NOT NULL,
+        created_at TEXT DEFAULT (datetime('now','localtime')),
+        updated_at TEXT DEFAULT (datetime('now','localtime')),
+        return_note TEXT,
+        closed_note TEXT,
+        reviewed_by TEXT,
+        closed_by TEXT,
+        revoked_by TEXT,
+        revoked_at TEXT,
+        parent_voucher_no TEXT,
+        import_source TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_vouchers_shift ON vouchers(shift_code);
+    CREATE INDEX IF NOT EXISTS idx_vouchers_status ON vouchers(status);
+    CREATE INDEX IF NOT EXISTS idx_vouchers_cashier ON vouchers(cashier);
+
+    CREATE TABLE IF NOT EXISTS timeline (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        voucher_no TEXT NOT NULL,
+        action TEXT NOT NULL,
+        actor TEXT NOT NULL,
+        actor_role TEXT,
+        detail TEXT,
+        created_at TEXT DEFAULT (datetime('now','localtime'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_timeline_voucher ON timeline(voucher_no);
+
+    CREATE TABLE IF NOT EXISTS shift_codes (
+        code TEXT PRIMARY KEY,
+        description TEXT,
+        created_at TEXT DEFAULT (datetime('now','localtime'))
+    );
+
+    CREATE TABLE IF NOT EXISTS import_log (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        filename TEXT,
+        total_count INTEGER,
+        success_count INTEGER,
+        failed_count INTEGER,
+        error_detail TEXT,
+        imported_by TEXT,
+        created_at TEXT DEFAULT (datetime('now','localtime'))
+    );
+    """)
+
+    for u in DEFAULT_USERS:
+        cur.execute("""
+            INSERT OR IGNORE INTO users (username, password, role, display_name)
+            VALUES (?, ?, ?, ?)
+        """, (u["username"], u["password"], u["role"], u["display_name"]))
+
+    default_shifts = [
+        ("早班", "06:00-14:00"),
+        ("中班", "14:00-22:00"),
+        ("晚班", "22:00-06:00"),
+    ]
+    for code, desc in default_shifts:
+        cur.execute("INSERT OR IGNORE INTO shift_codes (code, description) VALUES (?, ?)",
+                    (code, desc))
+
+    con.commit()
+    con.close()
+
+
+# ---------- Auth helpers ---------- #
+
+def login_required(fn):
+    @wraps(fn)
+    def wrapper(*a, **kw):
+        user = session.get("user")
+        if not user:
+            return jsonify({"error": "未登录，请先登录"}), 401
+        return fn(*a, **kw)
+    return wrapper
+
+
+def role_required(*roles):
+    def deco(fn):
+        @wraps(fn)
+        @login_required
+        def wrapper(*a, **kw):
+            user = session.get("user")
+            if user["role"] not in roles:
+                return jsonify({"error": "无权限执行该操作"}), 403
+            return fn(*a, **kw)
+        return wrapper
+    return deco
+
+
+def current_user():
+    return session.get("user")
+
+
+def add_timeline(cur, voucher_no, action, actor, role, detail=None):
+    cur.execute("""
+        INSERT INTO timeline (voucher_no, action, actor, actor_role, detail)
+        VALUES (?, ?, ?, ?, ?)
+    """, (voucher_no, action, actor, role, detail))
+
+
+def row_to_dict(row):
+    if row is None:
+        return None
+    return {k: row[k] for k in row.keys()}
+
+
+# ---------- HTML ---------- #
+
+@app.route("/")
+def index():
+    user = session.get("user")
+    with open(APP_DIR / "static" / "index.html", "r", encoding="utf-8") as f:
+        html = f.read()
+    return render_template_string(html, user=user)
+
+
+# ---------- Auth API ---------- #
+
+@app.route("/api/login", methods=["POST"])
+def api_login():
+    data = request.get_json(force=True, silent=True) or {}
+    username = (data.get("username") or "").strip()
+    password = (data.get("password") or "")
+    if not username or not password:
+        return jsonify({"error": "用户名和密码不能为空"}), 400
+    db = get_db()
+    row = db.execute("SELECT * FROM users WHERE username = ?", (username,)).fetchone()
+    if not row or row["password"] != password:
+        return jsonify({"error": "用户名或密码错误"}), 401
+    user = {
+        "username": row["username"],
+        "role": row["role"],
+        "display_name": row["display_name"] or row["username"]
+    }
+    session["user"] = user
+    return jsonify({"user": user})
+
+
+@app.route("/api/logout", methods=["POST"])
+def api_logout():
+    session.clear()
+    return jsonify({"ok": True})
+
+
+@app.route("/api/me")
+@login_required
+def api_me():
+    return jsonify({"user": current_user()})
+
+
+@app.route("/api/users")
+@login_required
+def api_users():
+    db = get_db()
+    rows = db.execute("SELECT username, role, display_name FROM users ORDER BY username").fetchall()
+    return jsonify({"users": [row_to_dict(r) for r in rows]})
+
+
+# ---------- Shift / Codes ---------- #
+
+@app.route("/api/shifts")
+@login_required
+def api_shifts():
+    db = get_db()
+    rows = db.execute("SELECT code, description FROM shift_codes ORDER BY code").fetchall()
+    return jsonify({"shifts": [row_to_dict(r) for r in rows]})
+
+
+@app.route("/api/shifts", methods=["POST"])
+@role_required(ROLE_ADMIN, ROLE_MANAGER)
+def api_add_shift():
+    data = request.get_json(force=True, silent=True) or {}
+    code = (data.get("code") or "").strip()
+    description = (data.get("description") or "").strip()
+    if not code:
+        return jsonify({"error": "班次代码不能为空"}), 400
+    db = get_db()
+    try:
+        db.execute("INSERT INTO shift_codes (code, description) VALUES (?, ?)", (code, description))
+        db.commit()
+    except sqlite3.IntegrityError:
+        return jsonify({"error": "班次代码已存在"}), 400
+    return jsonify({"ok": True})
+
+
+# ---------- Vouchers ---------- #
+
+def validate_voucher_payload(data, is_import=False):
+    errors = []
+    voucher_no = (data.get("voucher_no") or "").strip()
+    shift_code = (data.get("shift_code") or "").strip()
+    shift_date = (data.get("shift_date") or "").strip()
+    cashier = (data.get("cashier") or "").strip()
+    diff_amount = data.get("diff_amount")
+    reason = (data.get("reason") or "").strip()
+    remark = (data.get("remark") or "").strip()
+
+    if not voucher_no and not is_import:
+        errors.append("单据编号不能为空")
+    if not shift_code:
+        errors.append("班次不能为空")
+    if not shift_date:
+        errors.append("班次日期不能为空")
+    if not cashier:
+        errors.append("收银员不能为空")
+
+    if diff_amount is None or diff_amount == "":
+        errors.append("差异金额不能为空")
+    else:
+        try:
+            diff_amount = float(diff_amount)
+        except (TypeError, ValueError):
+            errors.append("差异金额必须是数字")
+            diff_amount = 0
+
+        if diff_amount < 0 and not reason:
+            errors.append("负金额（短款）必须填写原因")
+
+    return {
+        "voucher_no": voucher_no,
+        "shift_code": shift_code,
+        "shift_date": shift_date,
+        "cashier": cashier,
+        "diff_amount": diff_amount if isinstance(diff_amount, (int, float)) else 0,
+        "reason": reason,
+        "remark": remark,
+        "_errors": errors
+    }
+
+
+def gen_voucher_no(db, shift_code, shift_date):
+    date_str = shift_date.replace("-", "")
+    prefix = f"SD{date_str}"
+    row = db.execute(
+        "SELECT COUNT(*) AS c FROM vouchers WHERE voucher_no LIKE ?", (prefix + "%",)
+    ).fetchone()
+    return f"{prefix}{row['c'] + 1:04d}"
+
+
+@app.route("/api/vouchers", methods=["GET"])
+@login_required
+def api_list_vouchers():
+    shift_code = request.args.get("shift_code") or ""
+    handler = request.args.get("handler") or ""
+    status = request.args.get("status") or ""
+    keyword = (request.args.get("keyword") or "").strip()
+
+    sql = "SELECT * FROM vouchers WHERE 1=1"
+    params = []
+    if shift_code:
+        sql += " AND shift_code = ?"
+        params.append(shift_code)
+    if handler:
+        sql += (" AND (created_by = ? OR reviewed_by = ? OR closed_by = ? "
+                "OR current_handler = ?)")
+        params += [handler, handler, handler, handler]
+    if status:
+        sql += " AND status = ?"
+        params.append(status)
+    if keyword:
+        sql += " AND (voucher_no LIKE ? OR cashier LIKE ? OR remark LIKE ? OR reason LIKE ?)"
+        k = f"%{keyword}%"
+        params += [k, k, k, k]
+    sql += " ORDER BY id DESC"
+
+    db = get_db()
+    rows = db.execute(sql, params).fetchall()
+    result = [row_to_dict(r) for r in rows]
+
+    handler_rows = db.execute("""
+        SELECT DISTINCT username, display_name FROM users
+        WHERE role IN ('manager','admin','cashier')
+        ORDER BY username
+    """).fetchall()
+
+    return jsonify({
+        "vouchers": result,
+        "handlers": [row_to_dict(r) for r in handler_rows]
+    })
+
+
+@app.route("/api/summary")
+@login_required
+def api_summary():
+    db = get_db()
+    rows = db.execute("""
+        SELECT status, COUNT(*) AS cnt,
+               COALESCE(SUM(diff_amount),0) AS total_amount
+        FROM vouchers
+        GROUP BY status
+    """).fetchall()
+    status_map = {r["status"]: {"count": r["cnt"], "total": r["total_amount"]} for r in rows}
+
+    pending_rows = db.execute("""
+        SELECT shift_code, COUNT(*) AS cnt
+        FROM vouchers WHERE status = ? GROUP BY shift_code
+    """, (STATUS_PENDING,)).fetchall()
+
+    return jsonify({
+        "status_map": status_map,
+        "pending_count": status_map.get(STATUS_PENDING, {}).get("count", 0),
+        "pending_total": status_map.get(STATUS_PENDING, {}).get("total", 0),
+        "open_count": sum(
+            status_map.get(s, {}).get("count", 0)
+            for s in (STATUS_DRAFT, STATUS_PENDING, STATUS_RETURNED, STATUS_REVIEWED)
+        ),
+        "pending_by_shift": {r["shift_code"]: r["cnt"] for r in pending_rows}
+    })
+
+
+@app.route("/api/vouchers/<int:vid>")
+@login_required
+def api_get_voucher(vid):
+    db = get_db()
+    v = db.execute("SELECT * FROM vouchers WHERE id = ?", (vid,)).fetchone()
+    if not v:
+        return jsonify({"error": "单据不存在"}), 404
+    tl = db.execute(
+        "SELECT * FROM timeline WHERE voucher_no = ? ORDER BY id ASC",
+        (v["voucher_no"],)
+    ).fetchall()
+    return jsonify({
+        "voucher": row_to_dict(v),
+        "timeline": [row_to_dict(t) for t in tl]
+    })
+
+
+@app.route("/api/vouchers", methods=["POST"])
+@role_required(ROLE_CASHIER, ROLE_ADMIN, ROLE_MANAGER)
+def api_create_voucher():
+    data = request.get_json(force=True, silent=True) or {}
+    payload = validate_voucher_payload(data)
+    if payload["_errors"]:
+        return jsonify({"error": payload["_errors"][0]}), 400
+
+    user = current_user()
+    db = get_db()
+
+    voucher_no = payload["voucher_no"] or gen_voucher_no(db, payload["shift_code"], payload["shift_date"])
+
+    existing = db.execute("SELECT * FROM vouchers WHERE voucher_no = ?", (voucher_no,)).fetchone()
+    if existing:
+        return jsonify({"error": "单据编号已存在"}), 400
+
+    cur = db.cursor()
+    cur.execute("""
+        INSERT INTO vouchers
+        (voucher_no, shift_code, shift_date, cashier, diff_amount, reason, remark,
+         status, current_handler, created_by)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (
+        voucher_no, payload["shift_code"], payload["shift_date"], payload["cashier"],
+        payload["diff_amount"], payload["reason"], payload["remark"],
+        STATUS_DRAFT, user["username"], user["username"]
+    ))
+    vid = cur.lastrowid
+    add_timeline(cur, voucher_no, "创建草稿", user["username"], user["role"],
+                 f"创建草稿：{voucher_no}")
+    db.commit()
+
+    return jsonify({"id": vid, "voucher_no": voucher_no})
+
+
+@app.route("/api/vouchers/<int:vid>/submit", methods=["POST"])
+@role_required(ROLE_CASHIER, ROLE_ADMIN, ROLE_MANAGER)
+def api_submit_voucher(vid):
+    data = request.get_json(force=True, silent=True) or {}
+    remark = (data.get("remark") or "").strip()
+    reason = (data.get("reason") or "").strip()
+    diff_amount = data.get("diff_amount")
+
+    user = current_user()
+    db = get_db()
+    v = db.execute("SELECT * FROM vouchers WHERE id = ?", (vid,)).fetchone()
+    if not v:
+        return jsonify({"error": "单据不存在"}), 404
+
+    if v["status"] not in (STATUS_DRAFT, STATUS_RETURNED):
+        return jsonify({"error": f"当前状态「{v['status']}」不允许提交"}), 400
+
+    if v["created_by"] != user["username"] and user["role"] not in (ROLE_ADMIN, ROLE_MANAGER):
+        return jsonify({"error": "只能提交自己创建的单据"}), 403
+
+    if v["status"] == STATUS_RETURNED:
+        prev_remark = v["remark"] or ""
+        prev_reason = v["reason"] or ""
+        if remark.strip() and remark.strip() == prev_remark.strip():
+            pass
+        if (not remark.strip() or remark.strip() == prev_remark.strip()) and \
+           (not reason.strip() or reason.strip() == prev_reason.strip()):
+            return jsonify({"error": "被退回后必须补充备注或原因才能重新提交"}), 400
+
+    amount = float(diff_amount) if diff_amount not in (None, "") else v["diff_amount"]
+    if amount < 0 and not (reason or v["reason"]):
+        return jsonify({"error": "负金额（短款）必须填写原因"}), 400
+
+    cur = db.cursor()
+    cur.execute("""
+        UPDATE vouchers
+        SET status = ?, updated_at = datetime('now','localtime'),
+            diff_amount = ?, reason = ?, remark = ?, current_handler = ?,
+            shift_code = COALESCE(?, shift_code),
+            shift_date = COALESCE(?, shift_date),
+            cashier = COALESCE(?, cashier)
+        WHERE id = ?
+    """, (
+        STATUS_PENDING,
+        amount,
+        reason or v["reason"],
+        remark or v["remark"],
+        None,
+        data.get("shift_code") or None,
+        data.get("shift_date") or None,
+        data.get("cashier") or None,
+        vid
+    ))
+    add_timeline(cur, v["voucher_no"], "提交复核", user["username"], user["role"],
+                 f"收银员提交复核，金额：{amount}，备注：{remark or v['remark'] or '无'}")
+    db.commit()
+    return jsonify({"ok": True, "status": STATUS_PENDING})
+
+
+@app.route("/api/vouchers/<int:vid>/review", methods=["POST"])
+@role_required(ROLE_MANAGER, ROLE_ADMIN)
+def api_review_voucher(vid):
+    data = request.get_json(force=True, silent=True) or {}
+    action = (data.get("action") or "").strip()
+    note = (data.get("note") or "").strip()
+    user = current_user()
+    db = get_db()
+    v = db.execute("SELECT * FROM vouchers WHERE id = ?", (vid,)).fetchone()
+    if not v:
+        return jsonify({"error": "单据不存在"}), 404
+    if v["status"] != STATUS_PENDING:
+        return jsonify({"error": f"当前状态「{v['status']}」不允许复核"}), 400
+
+    cur = db.cursor()
+    if action == "approve":
+        cur.execute("""
+            UPDATE vouchers SET status = ?, reviewed_by = ?, updated_at = datetime('now','localtime')
+            WHERE id = ?
+        """, (STATUS_REVIEWED, user["username"], vid))
+        add_timeline(cur, v["voucher_no"], "复核通过", user["username"], user["role"],
+                     f"值班长复核通过：{note or '无备注'}")
+        new_status = STATUS_REVIEWED
+    elif action == "return":
+        if not note:
+            return jsonify({"error": "退回必须填写退回说明"}), 400
+        cur.execute("""
+            UPDATE vouchers SET status = ?, return_note = ?, current_handler = ?,
+                updated_at = datetime('now','localtime')
+            WHERE id = ?
+        """, (STATUS_RETURNED, note, v["created_by"], vid))
+        add_timeline(cur, v["voucher_no"], "退回", user["username"], user["role"],
+                     f"退回说明：{note}")
+        new_status = STATUS_RETURNED
+    else:
+        return jsonify({"error": "未知操作"}), 400
+    db.commit()
+    return jsonify({"ok": True, "status": new_status})
+
+
+@app.route("/api/vouchers/<int:vid>/close", methods=["POST"])
+@role_required(ROLE_MANAGER, ROLE_ADMIN)
+def api_close_voucher(vid):
+    data = request.get_json(force=True, silent=True) or {}
+    note = (data.get("note") or "").strip()
+    user = current_user()
+    db = get_db()
+    v = db.execute("SELECT * FROM vouchers WHERE id = ?", (vid,)).fetchone()
+    if not v:
+        return jsonify({"error": "单据不存在"}), 404
+    if v["status"] not in (STATUS_REVIEWED, STATUS_PENDING):
+        return jsonify({"error": f"当前状态「{v['status']}」不允许关闭"}), 400
+    if v["created_by"] == user["username"]:
+        return jsonify({"error": "不允许关闭自己创建的单据"}), 403
+
+    cur = db.cursor()
+    cur.execute("""
+        UPDATE vouchers SET status = ?, closed_by = ?, closed_note = ?,
+            updated_at = datetime('now','localtime')
+        WHERE id = ?
+    """, (STATUS_CLOSED, user["username"], note, vid))
+    add_timeline(cur, v["voucher_no"], "关闭", user["username"], user["role"],
+                 f"关闭说明：{note or '无'}")
+    db.commit()
+    return jsonify({"ok": True, "status": STATUS_CLOSED})
+
+
+@app.route("/api/vouchers/<int:vid>/revoke", methods=["POST"])
+@role_required(ROLE_ADMIN, ROLE_MANAGER)
+def api_revoke_voucher(vid):
+    data = request.get_json(force=True, silent=True) or {}
+    reason_r = (data.get("reason") or "").strip()
+    if not reason_r:
+        return jsonify({"error": "撤销必须填写原因"}), 400
+
+    user = current_user()
+    db = get_db()
+    v = db.execute("SELECT * FROM vouchers WHERE id = ?", (vid,)).fetchone()
+    if not v:
+        return jsonify({"error": "单据不存在"}), 404
+    if v["status"] == STATUS_REVOKED:
+        return jsonify({"error": "单据已撤销"}), 400
+    if v["status"] not in (STATUS_REVIEWED, STATUS_CLOSED, STATUS_PENDING, STATUS_RETURNED, STATUS_DRAFT):
+        return jsonify({"error": f"当前状态「{v['status']}」不允许撤销"}), 400
+
+    cur = db.cursor()
+
+    new_no = v["voucher_no"] + "-R" + datetime.now().strftime("%H%M%S")
+    cur.execute("""
+        UPDATE vouchers SET status = ?, revoked_by = ?, revoked_at = datetime('now','localtime'),
+            updated_at = datetime('now','localtime')
+        WHERE id = ?
+    """, (STATUS_REVOKED, user["username"], vid))
+
+    cur.execute("""
+        INSERT INTO vouchers
+        (voucher_no, shift_code, shift_date, cashier, diff_amount, reason, remark,
+         status, current_handler, created_by, parent_voucher_no)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (
+        new_no, v["shift_code"], v["shift_date"], v["cashier"],
+        v["diff_amount"], v["reason"], v["remark"],
+        STATUS_DRAFT, user["username"], v["created_by"], v["voucher_no"]
+    ))
+    new_vid = cur.lastrowid
+    add_timeline(cur, v["voucher_no"], "撤销", user["username"], user["role"],
+                 f"撤销原因：{reason_r}，已生成新单据 {new_no} 用于更正")
+    add_timeline(cur, new_no, "创建草稿（撤销更正）", user["username"], user["role"],
+                 f"由原单据 {v['voucher_no']} 撤销后生成，撤销原因：{reason_r}")
+    db.commit()
+    return jsonify({"ok": True, "new_id": new_vid, "new_voucher_no": new_no,
+                    "status": STATUS_REVOKED})
+
+
+# ---------- CSV Import / Export ---------- #
+
+@app.route("/api/vouchers/export.csv")
+@login_required
+def api_export_csv():
+    db = get_db()
+    rows = db.execute("SELECT * FROM vouchers ORDER BY id DESC").fetchall()
+
+    buf = io.StringIO()
+    buf.write("\ufeff")
+    writer = csv.writer(buf)
+    writer.writerow([
+        "单据编号", "状态", "班次", "班次日期", "收银员", "差异金额",
+        "原因", "备注", "创建人", "创建时间", "复核人", "关闭人",
+        "退回说明", "关闭说明", "撤销人", "撤销时间", "关联原单", "导入来源"
+    ])
+    status_text = {
+        STATUS_DRAFT: "草稿", STATUS_PENDING: "待复核", STATUS_REVIEWED: "复核通过",
+        STATUS_RETURNED: "已退回", STATUS_CLOSED: "已关闭", STATUS_REVOKED: "已撤销"
+    }
+    for r in rows:
+        writer.writerow([
+            r["voucher_no"], status_text.get(r["status"], r["status"]),
+            r["shift_code"], r["shift_date"], r["cashier"], r["diff_amount"],
+            r["reason"] or "", r["remark"] or "", r["created_by"],
+            r["created_at"], r["reviewed_by"] or "", r["closed_by"] or "",
+            r["return_note"] or "", r["closed_note"] or "", r["revoked_by"] or "",
+            r["revoked_at"] or "", r["parent_voucher_no"] or "", r["import_source"] or ""
+        ])
+    output = buf.getvalue().encode("utf-8")
+    resp = make_response(output)
+    resp.headers["Content-Type"] = "text/csv; charset=utf-8"
+    fn = f"vouchers_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+    resp.headers["Content-Disposition"] = f'attachment; filename="{fn}"'
+    return resp
+
+
+@app.route("/api/vouchers/import", methods=["POST"])
+@role_required(ROLE_ADMIN, ROLE_MANAGER, ROLE_CASHIER)
+def api_import_csv():
+    if "file" not in request.files:
+        return jsonify({"error": "未上传文件"}), 400
+    f = request.files["file"]
+    user = current_user()
+    filename = f.filename or "import.csv"
+
+    raw = f.stream.read()
+    # try utf-8 then gbk
+    text = None
+    for enc in ("utf-8-sig", "utf-8", "gbk"):
+        try:
+            text = raw.decode(enc)
+            break
+        except UnicodeDecodeError:
+            continue
+    if text is None:
+        return jsonify({"error": "无法识别文件编码"}), 400
+
+    reader = csv.DictReader(io.StringIO(text))
+    headers = reader.fieldnames or []
+    def col(row, *names):
+        for n in names:
+            if n in row and row[n] is not None:
+                val = str(row[n]).strip()
+                if val:
+                    return val
+        return ""
+
+    total = 0
+    success = 0
+    failed = 0
+    errors = []
+    db = get_db()
+    cur = db.cursor()
+
+    # Chinese -> English status map
+    status_map_cn = {
+        "草稿": STATUS_DRAFT,
+        "待复核": STATUS_PENDING,
+        "复核通过": STATUS_REVIEWED,
+        "已退回": STATUS_RETURNED,
+        "已关闭": STATUS_CLOSED,
+        "已撤销": STATUS_REVOKED
+    }
+
+    try:
+        for i, row in enumerate(reader, start=1):
+            total += 1
+            try:
+                vno = col(row, "单据编号", "voucher_no")
+                status_raw = col(row, "状态", "status")
+                shift_code = col(row, "班次", "shift_code")
+                shift_date = col(row, "班次日期", "shift_date")
+                cashier = col(row, "收银员", "cashier")
+                diff = col(row, "差异金额", "diff_amount")
+                reason = col(row, "原因", "reason")
+                remark = col(row, "备注", "remark")
+                created_by = col(row, "创建人", "created_by") or user["username"]
+
+                if not vno:
+                    raise ValueError("缺少单据编号")
+                if not shift_code:
+                    raise ValueError("缺少班次")
+                if not shift_date:
+                    raise ValueError("缺少班次日期")
+                if not cashier:
+                    raise ValueError("缺少收银员")
+                try:
+                    diff_f = float(diff) if diff else 0
+                except ValueError:
+                    raise ValueError(f"差异金额无效：{diff}")
+                if diff_f < 0 and not reason:
+                    raise ValueError("负金额必须填写原因")
+
+                existing = cur.execute(
+                    "SELECT * FROM vouchers WHERE voucher_no = ?", (vno,)
+                ).fetchone()
+                if existing:
+                    if existing["status"] == STATUS_CLOSED:
+                        raise ValueError(f"单据已关闭，不允许重复导入")
+                    elif existing["status"] == STATUS_REVOKED:
+                        raise ValueError(f"单据已撤销，不允许重复导入")
+                    else:
+                        raise ValueError(f"单据编号已存在（状态：{existing['status']}）")
+
+                status = status_map_cn.get(status_raw, STATUS_DRAFT)
+                if status in (STATUS_CLOSED, STATUS_REVOKED):
+                    raise ValueError("不允许导入已关闭或已撤销状态的单据")
+
+                cur.execute("""
+                    INSERT INTO vouchers
+                    (voucher_no, shift_code, shift_date, cashier, diff_amount, reason, remark,
+                     status, current_handler, created_by, import_source)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    vno, shift_code, shift_date, cashier, diff_f, reason, remark,
+                    status, created_by, created_by, filename
+                ))
+                add_timeline(cur, vno, "导入", user["username"], user["role"],
+                             f"从文件 {filename} 导入，导入状态：{status}")
+                success += 1
+            except Exception as e:
+                failed += 1
+                errors.append(f"第{i}行：{str(e)}")
+                if len(errors) > 50:
+                    errors.append("...其余错误省略...")
+                    break
+
+        cur.execute("""
+            INSERT INTO import_log (filename, total_count, success_count, failed_count,
+                                    error_detail, imported_by)
+            VALUES (?, ?, ?, ?, ?, ?)
+        """, (filename, total, success, failed,
+              "\n".join(errors[:200])[:2000], user["username"]))
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        return jsonify({"error": f"导入异常：{e}"}), 500
+
+    return jsonify({
+        "ok": True,
+        "total": total,
+        "success": success,
+        "failed": failed,
+        "errors": errors
+    })
+
+
+@app.route("/api/import_logs")
+@login_required
+def api_import_logs():
+    db = get_db()
+    rows = db.execute("SELECT * FROM import_log ORDER BY id DESC LIMIT 100").fetchall()
+    return jsonify({"logs": [row_to_dict(r) for r in rows]})
+
+
+# ---------- Init & Run ---------- #
+
+init_db()
+
+if __name__ == "__main__":
+    print("=" * 60)
+    print(" 门店交接班差异登记工具")
+    print(f" 数据文件: {DB_PATH}")
+    print(" 默认账号:")
+    for u in DEFAULT_USERS:
+        print(f"   {u['username']:<10s} / {u['password']:<12s} ({u['display_name']})")
+    print(" 访问地址: http://127.0.0.1:5000/")
+    print("=" * 60)
+    app.run(host="127.0.0.1", port=5000, debug=False)
