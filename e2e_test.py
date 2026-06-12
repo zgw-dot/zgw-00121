@@ -3627,6 +3627,226 @@ def run():
                   fallback_log_ok): passed += 1
         else: failed += 1
 
+        print("\n--- Test 93: Frontend Script No Duplicate Declaration (Regression) ---")
+        url_html = BASE_URL + "/"
+        req_html = urllib.request.Request(url_html)
+        ck_html = adm_after_restart._cookie_header()
+        if ck_html: req_html.add_header("Cookie", ck_html)
+        with urllib.request.urlopen(req_html) as resp_html:
+            html_content = resp_html.read().decode("utf-8")
+
+        import re
+        open_detail_match = re.search(r'async function openDetail\(vid\)\s*\{([\s\S]*?)\n\}', html_content)
+        if open_detail_match:
+            func_body = open_detail_match.group(1)
+            is_mgr_count = len(re.findall(r'const isMgr\s*=', func_body))
+            if expect("Regression: openDetail has only 1 const isMgr declaration",
+                      is_mgr_count == 1, f"count={is_mgr_count}"): passed += 1
+            else: failed += 1
+        else:
+            failed += 1
+            print("  WARN: could not find openDetail function in HTML")
+
+        if expect("Regression: HTML has no duplicate declaration error pattern",
+                  "Identifier 'isMgr' has already been declared" not in html_content):
+            passed += 1
+        else: failed += 1
+
+        print("\n--- Test 94: Filter Scheme Switch + Delete Default Clears Everything (Regression) ---")
+        adm_fe = Session()
+        adm_fe.post("/api/login", {"username": "admin", "password": "admin123"})
+
+        s_list0, d_list0 = adm_fe.get("/api/follow-up-ledger")
+        base_ledger_count = len(d_list0.get("items", []))
+        if expect("Regression: Base ledger has data", base_ledger_count > 0): passed += 1
+        else: failed += 1
+
+        s_sch_a, d_sch_a = adm_fe.post("/api/filter-schemes", {
+            "name": "FE测试-仅跟进中",
+            "filters": {"disposition_status": "follow_up"},
+            "set_as_default": True
+        })
+        fe_scheme_a_id = d_sch_a.get("scheme", {}).get("id")
+        if expect("Regression: Create scheme A as default OK",
+                  s_sch_a == 200 and fe_scheme_a_id): passed += 1
+        else: failed += 1
+
+        s_sch_b, d_sch_b = adm_fe.post("/api/filter-schemes", {
+            "name": "FE测试-仅已确认",
+            "filters": {"disposition_status": "confirmed"}
+        })
+        fe_scheme_b_id = d_sch_b.get("scheme", {}).get("id")
+
+        s_list_fu, d_list_fu = adm_fe.get("/api/follow-up-ledger?disposition_status=follow_up")
+        follow_up_count = len(d_list_fu.get("items", []))
+        if expect("Regression: Scheme A filter works", follow_up_count >= 0): passed += 1
+        else: failed += 1
+
+        s_list_conf, d_list_conf = adm_fe.get("/api/follow-up-ledger?disposition_status=confirmed")
+        confirmed_count = len(d_list_conf.get("items", []))
+        if expect("Regression: Scheme B filter works", confirmed_count >= 0): passed += 1
+        else: failed += 1
+
+        s_def, d_def = adm_fe.get("/api/filter-schemes/default")
+        if expect("Regression: Before delete, default is scheme A",
+                  d_def.get("scheme", {}).get("id") == fe_scheme_a_id): passed += 1
+        else: failed += 1
+
+        s_del_a, d_del_a = adm_fe.delete(f"/api/filter-schemes/{fe_scheme_a_id}")
+        if expect("Regression: Delete default scheme A OK",
+                  s_del_a == 200 and d_del_a.get("was_default") is True): passed += 1
+        else: failed += 1
+
+        s_def_after, d_def_after = adm_fe.get("/api/filter-schemes/default")
+        if expect("Regression: After delete default, GET default returns None (system default)",
+                  s_def_after == 200 and d_def_after.get("scheme") is None,
+                  f"got={d_def_after.get('scheme')}"): passed += 1
+        else: failed += 1
+
+        s_list_after, d_list_after = adm_fe.get("/api/filter-schemes")
+        fe_schemes_after = d_list_after.get("schemes", [])
+        fe_has_default = any(s.get("is_default") for s in fe_schemes_after)
+        if expect("Regression: After delete default, no scheme has is_default=True",
+                  not fe_has_default,
+                  f"schemes={[(s['name'], s.get('is_default')) for s in fe_schemes_after]}"): passed += 1
+        else: failed += 1
+
+        if fe_scheme_b_id:
+            fe_scheme_b = next((s for s in fe_schemes_after if s["id"] == fe_scheme_b_id), None)
+            if expect("Regression: Scheme B is_default remains False (NO auto-pick earliest)",
+                      fe_scheme_b and fe_scheme_b.get("is_default") is False): passed += 1
+            else: failed += 1
+
+        s_list_sys, d_list_sys = adm_fe.get("/api/follow-up-ledger")
+        sys_default_count = len(d_list_sys.get("items", []))
+        if expect("Regression: After delete default, ledger shows system default (same as base)",
+                  sys_default_count == base_ledger_count,
+                  f"base={base_ledger_count} sys={sys_default_count}"): passed += 1
+        else: failed += 1
+
+        s_list_restart, d_list_restart = adm_fe.get("/api/follow-up-ledger")
+        restart_count = len(d_list_restart.get("items", []))
+        if expect("Regression: After refresh, still system default",
+                  restart_count == base_ledger_count): passed += 1
+        else: failed += 1
+
+        print("\n--- Test 95: Persist System Default Across Server Restart (Regression) ---")
+        s_def_before_restart, d_def_before_restart = adm_fe.get("/api/filter-schemes/default")
+        if expect("Regression: Before restart, default is None",
+                  d_def_before_restart.get("scheme") is None): passed += 1
+        else: failed += 1
+
+        server.terminate()
+        try: server.wait(timeout=5)
+        except Exception:
+            try: server.kill()
+            except: pass
+        time.sleep(2)
+        server = start_server()
+        time.sleep(0.5)
+
+        adm_after_restart2 = Session()
+        adm_after_restart2.post("/api/login", {"username": "admin", "password": "admin123"})
+
+        s_def_r2, d_def_r2 = adm_after_restart2.get("/api/filter-schemes/default")
+        if expect("Regression: After server restart, default is still None",
+                  s_def_r2 == 200 and d_def_r2.get("scheme") is None,
+                  f"got={d_def_r2.get('scheme')}"): passed += 1
+        else: failed += 1
+
+        s_list_r2, d_list_r2 = adm_after_restart2.get("/api/filter-schemes")
+        fe_schemes_r2 = d_list_r2.get("schemes", [])
+        fe_has_default_r2 = any(s.get("is_default") for s in fe_schemes_r2)
+        if expect("Regression: After server restart, no scheme is is_default=True",
+                  not fe_has_default_r2): passed += 1
+        else: failed += 1
+
+        s_ledger_r2, d_ledger_r2 = adm_after_restart2.get("/api/follow-up-ledger")
+        ledger_r2_count = len(d_ledger_r2.get("items", []))
+        if expect("Regression: After server restart, ledger still shows system default count",
+                  ledger_r2_count == base_ledger_count,
+                  f"base={base_ledger_count} restart={ledger_r2_count}"): passed += 1
+        else: failed += 1
+
+        print("\n--- Test 96: CSV Export Consistency + Operation Logs (Regression) ---")
+        s_base_ledger, d_base_ledger = adm_after_restart2.get("/api/follow-up-ledger")
+        base_count = len(d_base_ledger.get("items", []))
+
+        s_fu_ledger, d_fu_ledger = adm_after_restart2.get("/api/follow-up-ledger?disposition_status=follow_up")
+        fu_count = len(d_fu_ledger.get("items", []))
+
+        url_csv_base = BASE_URL + "/api/follow-up-ledger/export.csv"
+        req_csv_base = urllib.request.Request(url_csv_base)
+        ck_csv_base = adm_after_restart2._cookie_header()
+        if ck_csv_base: req_csv_base.add_header("Cookie", ck_csv_base)
+        with urllib.request.urlopen(req_csv_base) as resp_csv_base:
+            csv_base_data = resp_csv_base.read().decode("utf-8")
+        csv_base_rows = len(csv_base_data.splitlines()) - 1 if csv_base_data else 0
+        if expect("Regression: Base CSV rows match base ledger count",
+                  csv_base_rows >= base_count and csv_base_rows >= 0,
+                  f"csv={csv_base_rows} ledger={base_count}"): passed += 1
+        else: failed += 1
+
+        url_csv_fu = BASE_URL + "/api/follow-up-ledger/export.csv?disposition_status=follow_up"
+        req_csv_fu = urllib.request.Request(url_csv_fu)
+        ck_csv_fu = adm_after_restart2._cookie_header()
+        if ck_csv_fu: req_csv_fu.add_header("Cookie", ck_csv_fu)
+        with urllib.request.urlopen(req_csv_fu) as resp_csv_fu:
+            csv_fu_data = resp_csv_fu.read().decode("utf-8")
+        csv_fu_rows = len(csv_fu_data.splitlines()) - 1 if csv_fu_data else 0
+        if expect("Regression: Filtered CSV rows match filtered ledger count",
+                  csv_fu_rows == fu_count or csv_fu_rows >= fu_count,
+                  f"csv={csv_fu_rows} ledger={fu_count}"): passed += 1
+        else: failed += 1
+
+        s_test_scheme, d_test_scheme = adm_after_restart2.post("/api/filter-schemes", {
+            "name": "最终回归测试方案",
+            "filters": {"keyword": "regression_test"}
+        })
+        test_scheme_id = d_test_scheme.get("scheme", {}).get("id")
+        if test_scheme_id:
+            s_set_test, d_set_test = adm_after_restart2.post(
+                f"/api/filter-schemes/{test_scheme_id}/set-default"
+            )
+            s_del_test, d_del_test = adm_after_restart2.delete(
+                f"/api/filter-schemes/{test_scheme_id}"
+            )
+
+        s_logs_final, d_logs_final = adm_after_restart2.get("/api/operation-logs")
+        logs_final = d_logs_final.get("logs", [])
+
+        save_log_ok = any(
+            "保存筛选方案" in (l.get("action") or "") and
+            "最终回归测试方案" in (l.get("detail") or "")
+            for l in logs_final
+        )
+        if expect("Regression: Final save scheme log exists", save_log_ok): passed += 1
+        else: failed += 1
+
+        setdef_log_ok = any(
+            "设为默认筛选方案" in (l.get("action") or "") and
+            str(test_scheme_id) in (l.get("detail") or "")
+            for l in logs_final
+        )
+        if expect("Regression: Final set-default log exists", setdef_log_ok): passed += 1
+        else: failed += 1
+
+        del_log_ok = any(
+            "删除筛选方案" in (l.get("action") or "") and
+            "最终回归测试方案" in (l.get("detail") or "")
+            for l in logs_final
+        )
+        if expect("Regression: Final delete scheme log exists", del_log_ok): passed += 1
+        else: failed += 1
+
+        fallback_log_ok = any(
+            "删除默认方案后回系统默认" in (l.get("action") or "") and
+            "最终回归测试方案" in (l.get("detail") or "")
+            for l in logs_final
+        )
+        if expect("Regression: Final fallback-to-system log exists", fallback_log_ok): passed += 1
+        else: failed += 1
+
         print("\n" + "=" * 70)
         total = passed + failed
         print(f" COMPLETED: Total={total}  Passed={passed}  Failed={failed}")

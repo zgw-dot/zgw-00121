@@ -1081,7 +1081,6 @@ async function openDetail(vid){
     </div>
   `;
   let acts = '';
-  const isMgr = ['admin','manager'].includes(ROLE);
   const isOwner = v.created_by===USER.username;
   acts += '<div style="display:flex;gap:8px;margin-bottom:8px;flex-wrap:wrap">';
   if((v.status==='draft'||v.status==='returned') && (isOwner||isMgr)){
