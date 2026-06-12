@@ -745,6 +745,8 @@ def api_revoke_voucher(vid):
                  f"撤销原因：{reason_r}，已生成新单据 {new_no} 用于更正")
     add_timeline(cur, new_no, "创建草稿（撤销更正）", user["username"], user["role"],
                  f"由原单据 {v['voucher_no']} 撤销后生成，撤销原因：{reason_r}")
+    check_alert_rules(db, new_no, new_vid, v["cashier"],
+                      v["diff_amount"], v["shift_date"], cur)
     db.commit()
     return jsonify({"ok": True, "new_id": new_vid, "new_voucher_no": new_no,
                     "status": STATUS_REVOKED})

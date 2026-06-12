@@ -991,66 +991,187 @@ def run():
                   f"found_disp={has_disp_row}"): passed += 1
         else: failed += 1
 
-        print("\n--- Test 28: Revoked/New Voucher Alert Isolation ---")
+        print("\n--- Test 28: Revoke New Draft Has Immediate Alerts (Bug Fix) ---")
         s, d = cash2.post("/api/vouchers", {
-            "voucher_no":"T-REV-DISP-001",
-            "shift_code":"中班",
+            "voucher_no":"T-REV-IMM-001",
+            "shift_code":"早班",
             "shift_date":"2026-06-12",
             "cashier":"测试员",
-            "diff_amount": 200.00,
+            "diff_amount": 300.00,
             "reason":"系统差异",
-            "remark":"测试撤销后预警隔离",
+            "remark":"测试撤销后草稿立即可见预警",
         })
-        vid_rev = d.get("id")
-        cash2.post(f"/api/vouchers/{vid_rev}/submit", {"remark":"提交"})
-        man4.post(f"/api/vouchers/{vid_rev}/review", {"action":"approve"})
+        vid_imm = d.get("id")
+        cash2.post(f"/api/vouchers/{vid_imm}/submit", {"remark":"提交"})
+        man4.post(f"/api/vouchers/{vid_imm}/review", {"action":"approve"})
 
-        s, d = man4.get(f"/api/vouchers/{vid_rev}")
-        old_alerts = d.get("alerts", [])
-        old_alert_id = old_alerts[0]["id"] if old_alerts else None
-        if expect("Original voucher has alerts", old_alert_id is not None): passed += 1
+        s, d = man4.get(f"/api/vouchers/{vid_imm}")
+        old_alerts_imm = d.get("alerts", [])
+        old_alert_id_imm = old_alerts_imm[0]["id"] if old_alerts_imm else None
+        if expect("Original voucher has alerts before revoke", old_alert_id_imm is not None,
+                  f"old_alerts={len(old_alerts_imm)}"): passed += 1
         else: failed += 1
 
-        s, d = man4.post(f"/api/alert-logs/{old_alert_id}/disposition", {
+        s, d = man4.post(f"/api/alert-logs/{old_alert_id_imm}/disposition", {
             "disposition_status": "confirmed",
-            "disposition_note": "原单已确认处理",
-            "disposition_version": old_alerts[0]["disposition_version"]
+            "disposition_note": "原单已确认处理完毕",
+            "disposition_version": old_alerts_imm[0]["disposition_version"]
         })
-        if expect("Original alert disposition set", s == 200): passed += 1
+        if expect("Original alert disposition set to confirmed", s == 200): passed += 1
         else: failed += 1
 
-        s, d = man4.post(f"/api/vouchers/{vid_rev}/revoke", {"reason":"原金额有误需更正"})
-        new_vid = d.get("new_id")
-        new_no = d.get("new_voucher_no")
-        if expect("Revoke successful", s == 200 and new_vid and new_no): passed += 1
+        s, d = man4.post(f"/api/vouchers/{vid_imm}/revoke", {"reason":"金额有误需更正"})
+        new_vid_imm = d.get("new_id")
+        new_no_imm = d.get("new_voucher_no")
+        if expect("Revoke succeeds and returns new_id", s == 200 and new_vid_imm and new_no_imm,
+                  f"new_id={new_vid_imm} new_no={new_no_imm}"): passed += 1
         else: failed += 1
 
-        s, d = cash2.post(f"/api/vouchers/{new_vid}/submit", {"diff_amount":250.00,"remark":"更正后金额250元"})
-
-        s, d = man4.get(f"/api/vouchers/{new_vid}")
-        new_alerts = d.get("alerts", [])
-        if expect("New voucher has its own alerts", len(new_alerts) > 0, f"new_alerts={len(new_alerts)}"): passed += 1
+        s, d = man4.get(f"/api/vouchers/{new_vid_imm}")
+        new_alerts_immediate = d.get("alerts", [])
+        if expect("BUG FIX: New draft has alerts IMMEDIATELY after revoke (before submit)",
+                  len(new_alerts_immediate) > 0, f"alerts_count={len(new_alerts_immediate)}"): passed += 1
         else: failed += 1
 
-        new_alert_ids = [a["id"] for a in new_alerts]
-        if expect("New alert IDs different from old", old_alert_id not in new_alert_ids,
-                  f"old_id={old_alert_id} new_ids={new_alert_ids}"): passed += 1
+        new_alert_ids_imm = [a["id"] for a in new_alerts_immediate]
+        if expect("New alert IDs are different from original (independent records)",
+                  old_alert_id_imm not in new_alert_ids_imm,
+                  f"old_id={old_alert_id_imm} new_ids={new_alert_ids_imm}"): passed += 1
         else: failed += 1
 
-        for na in new_alerts:
-            if expect("New alerts start as unprocessed", na["disposition_status"] == "unprocessed",
+        for na in new_alerts_immediate:
+            if expect("New alert disposition is unprocessed (NOT copied from original)",
+                      na["disposition_status"] == "unprocessed",
                       f"status={na['disposition_status']}"): passed += 1
             else: failed += 1
-            if expect("New alerts have no handler", na.get("disposition_handler") is None,
+            if expect("New alert disposition note is empty (NOT copied)",
+                      na.get("disposition_note") in (None, ""),
+                      f"note={na.get('disposition_note')}"): passed += 1
+            else: failed += 1
+            if expect("New alert disposition handler is None (NOT copied)",
+                      na.get("disposition_handler") is None,
                       f"handler={na.get('disposition_handler')}"): passed += 1
             else: failed += 1
+            if expect("New alert disposition version is 0 (NOT copied)",
+                      na["disposition_version"] == 0,
+                      f"version={na['disposition_version']}"): passed += 1
+            else: failed += 1
+            if expect("New alert has voucher_id matching new voucher",
+                      na.get("voucher_id") == new_vid_imm or na.get("voucher_no") == new_no_imm,
+                      f"voucher_id={na.get('voucher_id')} voucher_no={na.get('voucher_no')}"): passed += 1
+            else: failed += 1
 
-        s, d = man4.get(f"/api/vouchers/{vid_rev}")
-        old_alerts_after = d.get("alerts", [])
-        old_disp = old_alerts_after[0] if old_alerts_after else None
-        if expect("Original voucher disposition unchanged after revoke",
-                  old_disp and old_disp["disposition_status"] == "confirmed",
-                  f"status={old_disp['disposition_status'] if old_disp else 'N/A'}"): passed += 1
+        s, d = man4.get(f"/api/vouchers/{vid_imm}")
+        old_alerts_after_revoke = d.get("alerts", [])
+        old_disp_imm = old_alerts_after_revoke[0] if old_alerts_after_revoke else None
+        if expect("Original voucher disposition unchanged after revoke (isolation)",
+                  old_disp_imm and old_disp_imm["disposition_status"] == "confirmed",
+                  f"status={old_disp_imm['disposition_status'] if old_disp_imm else 'N/A'}"): passed += 1
+        else: failed += 1
+        if expect("Original handler remains manager after revoke",
+                  old_disp_imm and old_disp_imm["disposition_handler"] == "manager",
+                  f"handler={old_disp_imm['disposition_handler'] if old_disp_imm else 'N/A'}"): passed += 1
+        else: failed += 1
+
+        print("\n--- Test 28b: Alert Log Filtering & CSV for Revoked New Draft ---")
+        s, d = man4.get("/api/alert-logs?disposition_status=unprocessed")
+        unproc_for_new = [l for l in d.get("logs", []) if l["voucher_no"] == new_no_imm]
+        if expect("Alert logs filter by unprocessed returns new draft alerts",
+                  len(unproc_for_new) >= 1, f"count={len(unproc_for_new)}"): passed += 1
+        else: failed += 1
+
+        s, d = man4.get(f"/api/alert-logs?voucher_no={new_no_imm}")
+        new_draft_logs = d.get("logs", [])
+        if expect("Alert logs by voucher_no for new draft shows disposition fields",
+                  len(new_draft_logs) >= 1 and new_draft_logs[0]["disposition_status"] == "unprocessed",
+                  f"logs={len(new_draft_logs)} status={new_draft_logs[0].get('disposition_status') if new_draft_logs else 'N/A'}"): passed += 1
+        else: failed += 1
+
+        s, d = man4.get("/api/vouchers?alert_disposition=unprocessed")
+        v_with_unproc = [v for v in d.get("vouchers", []) if v["voucher_no"] == new_no_imm]
+        if expect("Voucher list filter by alert_disposition=unprocessed includes new draft",
+                  len(v_with_unproc) == 1, f"count={len(v_with_unproc)}"): passed += 1
+        else: failed += 1
+
+        s, d = man4.get("/api/vouchers?alert_disposition=confirmed")
+        v_with_conf = [v for v in d.get("vouchers", []) if v["voucher_no"] == new_no_imm]
+        if expect("Voucher list filter by alert_disposition=confirmed excludes new draft",
+                  len(v_with_conf) == 0, f"count={len(v_with_conf)}"): passed += 1
+        else: failed += 1
+
+        url2 = BASE_URL + "/api/vouchers/export.csv"
+        req2 = urllib.request.Request(url2)
+        cookie2 = man4._cookie_header()
+        if cookie2:
+            req2.add_header("Cookie", cookie2)
+        with urllib.request.urlopen(req2) as resp2:
+            csv2 = resp2.read().decode("utf-8")
+        lines2 = csv2.splitlines()
+        new_voucher_rows = [ln for ln in lines2 if new_no_imm in ln]
+        if expect("CSV export includes new draft voucher alert rows",
+                  len(new_voucher_rows) >= 1, f"rows={len(new_voucher_rows)}"): passed += 1
+        else: failed += 1
+        has_unproc_in_csv = any("未处理" in ln for ln in new_voucher_rows)
+        if expect("CSV export shows '未处理' disposition for new draft alerts",
+                  has_unproc_in_csv, f"has_unproc={has_unproc_in_csv}"): passed += 1
+        else: failed += 1
+        csv_headers = lines2[0]
+        if expect("CSV export headers include all disposition columns",
+                  all(k in csv_headers for k in ["处置状态","处置备注","处理人","处理时间","预警规则","预警原因"]),
+                  f"header={csv_headers}"): passed += 1
+        else: failed += 1
+
+        print("\n--- Test 28c: Disposition New & Old Independent After Submit ---")
+        s, d = man4.post(f"/api/alert-logs/{new_alert_ids_imm[0]}/disposition", {
+            "disposition_status": "follow_up",
+            "disposition_note": "新单需财务复核金额",
+            "disposition_version": 0
+        })
+        if expect("Can disposition new draft alert independently", s == 200): passed += 1
+        else: failed += 1
+
+        s, d = man4.get(f"/api/vouchers/{vid_imm}")
+        old_check = d.get("alerts", [])[0] if d.get("alerts") else None
+        if expect("Original alert disposition still confirmed after new alert changed",
+                  old_check and old_check["disposition_status"] == "confirmed",
+                  f"status={old_check['disposition_status'] if old_check else 'N/A'}"): passed += 1
+        else: failed += 1
+
+        s, d = cash2.post(f"/api/vouchers/{new_vid_imm}/submit",
+                          {"diff_amount": 350.00, "remark":"更正后金额350元，财务已复核"})
+        if expect("Submit new draft after revoke still works (no regression)",
+                  s == 200, f"status={s}"): passed += 1
+        else: failed += 1
+
+        s, d = man4.get(f"/api/vouchers/{new_vid_imm}")
+        alerts_after_submit = d.get("alerts", [])
+        if expect("Alerts still exist after submit (no duplicate explosion)",
+                  len(alerts_after_submit) >= 1, f"count={len(alerts_after_submit)}"): passed += 1
+        else: failed += 1
+        submit_alert_ids = {a["id"] for a in alerts_after_submit}
+        if expect("Alert IDs remain stable after submit (same records, not recreated)",
+                  new_alert_ids_imm[0] in submit_alert_ids,
+                  f"orig={new_alert_ids_imm[0]} after_submit={submit_alert_ids}"): passed += 1
+        else: failed += 1
+
+        print("\n--- Test 28d: Cashier Sees New Draft Alerts & Disposition (Read-Only) ---")
+        s, d = cash2.get(f"/api/vouchers/{new_vid_imm}")
+        cash_new_alerts = d.get("alerts", [])
+        if expect("Cashier can see new draft alert disposition results",
+                  len(cash_new_alerts) >= 1 and cash_new_alerts[0].get("disposition_status") == "follow_up",
+                  f"status={cash_new_alerts[0].get('disposition_status') if cash_new_alerts else 'N/A'}"): passed += 1
+        else: failed += 1
+        if expect("Cashier can see disposition handler on new draft alerts",
+                  cash_new_alerts[0].get("disposition_handler") == "manager",
+                  f"handler={cash_new_alerts[0].get('disposition_handler') if cash_new_alerts else 'N/A'}"): passed += 1
+        else: failed += 1
+
+        s, d = cash2.post(f"/api/alert-logs/{new_alert_ids_imm[0]}/disposition", {
+            "disposition_status": "ignored",
+            "disposition_note": "收银员尝试改",
+            "disposition_version": 1
+        })
+        if assert_eq("Cashier still cannot modify disposition on new draft alerts (403)", s, 403): passed += 1
         else: failed += 1
 
         print("\n--- Test 29: Cashier Sees Disposition Results But Cannot Edit ---")
