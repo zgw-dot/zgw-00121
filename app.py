@@ -223,6 +223,18 @@ def init_db():
         updated_at TEXT DEFAULT (datetime('now','localtime')),
         PRIMARY KEY (username, pref_key)
     );
+
+    CREATE TABLE IF NOT EXISTS filter_schemes (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        username TEXT NOT NULL,
+        name TEXT NOT NULL,
+        filters TEXT NOT NULL,
+        is_default INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT DEFAULT (datetime('now','localtime')),
+        updated_at TEXT DEFAULT (datetime('now','localtime'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_filter_schemes_user ON filter_schemes(username);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_filter_schemes_user_name ON filter_schemes(username, name);
     """)
 
     cur.execute("PRAGMA table_info(alert_logs)")
@@ -2018,6 +2030,216 @@ def api_follow_up_ledger_export():
     fn = f"follow_up_ledger_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
     resp.headers["Content-Disposition"] = f'attachment; filename="{fn}"'
     return resp
+
+
+# ---------- Filter Schemes ---------- #
+
+def _scheme_row_to_dict(row):
+    if row is None:
+        return None
+    d = row_to_dict(row)
+    try:
+        d["filters"] = json.loads(d["filters"]) if d["filters"] else {}
+    except Exception:
+        d["filters"] = {}
+    d["is_default"] = bool(d["is_default"])
+    return d
+
+
+@app.route("/api/filter-schemes", methods=["GET"])
+@role_required(ROLE_ADMIN, ROLE_MANAGER)
+def api_list_filter_schemes():
+    user = current_user()
+    db = get_db()
+    rows = db.execute(
+        "SELECT * FROM filter_schemes WHERE username = ? ORDER BY is_default DESC, id ASC",
+        (user["username"],)
+    ).fetchall()
+    schemes = [_scheme_row_to_dict(r) for r in rows]
+    return jsonify({"ok": True, "schemes": schemes})
+
+
+@app.route("/api/filter-schemes", methods=["POST"])
+@role_required(ROLE_ADMIN, ROLE_MANAGER)
+def api_create_filter_scheme():
+    data = request.get_json(force=True, silent=True) or {}
+    name = (data.get("name") or "").strip()
+    filters = data.get("filters") or {}
+    set_as_default = bool(data.get("set_as_default", False))
+
+    if not name:
+        return jsonify({"error": "方案名称不能为空"}), 400
+    if len(name) > 50:
+        return jsonify({"error": "方案名称不能超过50个字符"}), 400
+    if not isinstance(filters, dict):
+        return jsonify({"error": "筛选条件格式无效"}), 400
+
+    user = current_user()
+    db = get_db()
+    cur = db.cursor()
+
+    try:
+        filters_json = json.dumps(filters, ensure_ascii=False)
+
+        if set_as_default:
+            cur.execute(
+                "UPDATE filter_schemes SET is_default = 0 WHERE username = ?",
+                (user["username"],)
+            )
+
+        cur.execute("""
+            INSERT INTO filter_schemes (username, name, filters, is_default)
+            VALUES (?, ?, ?, ?)
+        """, (user["username"], name, filters_json, 1 if set_as_default else 0))
+
+        scheme_id = cur.lastrowid
+        add_operation_log(cur, "保存筛选方案", user["username"], user["role"],
+                         f"方案名称={name}, 设为默认={'是' if set_as_default else '否'}, 筛选条件={filters_json[:200]}")
+        db.commit()
+    except sqlite3.IntegrityError:
+        return jsonify({"error": "该方案名称已存在"}), 400
+
+    row = db.execute("SELECT * FROM filter_schemes WHERE id = ?", (scheme_id,)).fetchone()
+    return jsonify({"ok": True, "scheme": _scheme_row_to_dict(row)})
+
+
+@app.route("/api/filter-schemes/<int:scheme_id>", methods=["PUT"])
+@role_required(ROLE_ADMIN, ROLE_MANAGER)
+def api_update_filter_scheme(scheme_id):
+    data = request.get_json(force=True, silent=True) or {}
+    name = (data.get("name") or "").strip()
+    filters = data.get("filters")
+
+    user = current_user()
+    db = get_db()
+
+    existing = db.execute(
+        "SELECT * FROM filter_schemes WHERE id = ? AND username = ?",
+        (scheme_id, user["username"])
+    ).fetchone()
+    if not existing:
+        return jsonify({"error": "方案不存在或无权限修改"}), 404
+
+    if filters is not None and not isinstance(filters, dict):
+        return jsonify({"error": "筛选条件格式无效"}), 400
+
+    cur = db.cursor()
+    updates = []
+    params = []
+
+    if name:
+        if len(name) > 50:
+            return jsonify({"error": "方案名称不能超过50个字符"}), 400
+        updates.append("name = ?")
+        params.append(name)
+
+    if filters is not None:
+        updates.append("filters = ?")
+        params.append(json.dumps(filters, ensure_ascii=False))
+
+    if not updates:
+        return jsonify({"error": "未提供要更新的内容"}), 400
+
+    updates.append("updated_at = datetime('now','localtime')")
+    params.append(scheme_id)
+    params.append(user["username"])
+
+    try:
+        cur.execute(f"""
+            UPDATE filter_schemes SET {', '.join(updates)}
+            WHERE id = ? AND username = ?
+        """, params)
+
+        add_operation_log(cur, "修改筛选方案", user["username"], user["role"],
+                         f"方案ID={scheme_id}, 原名称={existing['name']}, 新名称={name or existing['name']}")
+        db.commit()
+    except sqlite3.IntegrityError:
+        return jsonify({"error": "该方案名称已存在"}), 400
+
+    row = db.execute("SELECT * FROM filter_schemes WHERE id = ?", (scheme_id,)).fetchone()
+    return jsonify({"ok": True, "scheme": _scheme_row_to_dict(row)})
+
+
+@app.route("/api/filter-schemes/<int:scheme_id>/set-default", methods=["POST"])
+@role_required(ROLE_ADMIN, ROLE_MANAGER)
+def api_set_default_scheme(scheme_id):
+    user = current_user()
+    db = get_db()
+
+    existing = db.execute(
+        "SELECT * FROM filter_schemes WHERE id = ? AND username = ?",
+        (scheme_id, user["username"])
+    ).fetchone()
+    if not existing:
+        return jsonify({"error": "方案不存在或无权限修改"}), 404
+
+    cur = db.cursor()
+    cur.execute(
+        "UPDATE filter_schemes SET is_default = 0 WHERE username = ?",
+        (user["username"],)
+    )
+    cur.execute(
+        "UPDATE filter_schemes SET is_default = 1 WHERE id = ? AND username = ?",
+        (scheme_id, user["username"])
+    )
+    add_operation_log(cur, "设为默认筛选方案", user["username"], user["role"],
+                     f"方案ID={scheme_id}, 方案名称={existing['name']}")
+    db.commit()
+
+    return jsonify({"ok": True})
+
+
+@app.route("/api/filter-schemes/<int:scheme_id>", methods=["DELETE"])
+@role_required(ROLE_ADMIN, ROLE_MANAGER)
+def api_delete_filter_scheme(scheme_id):
+    user = current_user()
+    db = get_db()
+
+    existing = db.execute(
+        "SELECT * FROM filter_schemes WHERE id = ? AND username = ?",
+        (scheme_id, user["username"])
+    ).fetchone()
+    if not existing:
+        return jsonify({"error": "方案不存在或无权限删除"}), 404
+
+    was_default = bool(existing["is_default"])
+
+    cur = db.cursor()
+    cur.execute(
+        "DELETE FROM filter_schemes WHERE id = ? AND username = ?",
+        (scheme_id, user["username"])
+    )
+    add_operation_log(cur, "删除筛选方案", user["username"], user["role"],
+                     f"方案ID={scheme_id}, 方案名称={existing['name']}, 原默认={'是' if was_default else '否'}")
+
+    if was_default:
+        next_default = cur.execute(
+            "SELECT id FROM filter_schemes WHERE username = ? ORDER BY id ASC LIMIT 1",
+            (user["username"],)
+        ).fetchone()
+        if next_default:
+            cur.execute(
+                "UPDATE filter_schemes SET is_default = 1 WHERE id = ? AND username = ?",
+                (next_default["id"], user["username"])
+            )
+            add_operation_log(cur, "删除默认方案后重置默认", user["username"], user["role"],
+                             f"原方案={existing['name']}已删除，系统自动选择新默认方案")
+
+    db.commit()
+
+    return jsonify({"ok": True, "was_default": was_default})
+
+
+@app.route("/api/filter-schemes/default", methods=["GET"])
+@role_required(ROLE_ADMIN, ROLE_MANAGER)
+def api_get_default_scheme():
+    user = current_user()
+    db = get_db()
+    row = db.execute(
+        "SELECT * FROM filter_schemes WHERE username = ? AND is_default = 1 LIMIT 1",
+        (user["username"],)
+    ).fetchone()
+    return jsonify({"ok": True, "scheme": _scheme_row_to_dict(row)})
 
 
 # ---------- Init & Run ---------- #

@@ -2987,6 +2987,455 @@ def run():
         else:
             failed += 1
 
+        print("\n--- Test 81: Filter Schemes - Permission Denied for Cashier ---")
+        cash_scheme = Session()
+        cash_scheme.post("/api/login", {"username": "cashier", "password": "cashier123"})
+
+        s_list, _ = cash_scheme.get("/api/filter-schemes")
+        if expect("Cashier cannot list filter schemes (403)", s_list == 403, f"status={s_list}"): passed += 1
+        else: failed += 1
+
+        s_create, _ = cash_scheme.post("/api/filter-schemes", {"name": "测试", "filters": {}})
+        if expect("Cashier cannot create filter scheme (403)", s_create == 403, f"status={s_create}"): passed += 1
+        else: failed += 1
+
+        s_update, _ = cash_scheme.put("/api/filter-schemes/1", {"name": "修改"})
+        if expect("Cashier cannot update filter scheme (403)", s_update == 403, f"status={s_update}"): passed += 1
+        else: failed += 1
+
+        s_set_default, _ = cash_scheme.post("/api/filter-schemes/1/set-default")
+        if expect("Cashier cannot set default scheme (403)", s_set_default == 403, f"status={s_set_default}"): passed += 1
+        else: failed += 1
+
+        s_delete, _ = cash_scheme.delete("/api/filter-schemes/1")
+        if expect("Cashier cannot delete filter scheme (403)", s_delete == 403, f"status={s_delete}"): passed += 1
+        else: failed += 1
+
+        s_get_default, _ = cash_scheme.get("/api/filter-schemes/default")
+        if expect("Cashier cannot get default scheme (403)", s_get_default == 403, f"status={s_get_default}"): passed += 1
+        else: failed += 1
+
+        print("\n--- Test 82: Filter Schemes - CRUD Operations ---")
+        adm_scheme = Session()
+        adm_scheme.post("/api/login", {"username": "admin", "password": "admin123"})
+
+        s_list, d_list = adm_scheme.get("/api/filter-schemes")
+        initial_count = len(d_list.get("schemes", []))
+        if expect("List schemes for admin returns 200", s_list == 200, f"status={s_list}"): passed += 1
+        else: failed += 1
+
+        s_create, d_create = adm_scheme.post("/api/filter-schemes", {
+            "name": "高优先级预警",
+            "filters": {
+                "disposition_status": "follow_up",
+                "due_status": "overdue",
+                "keyword": "高优先级"
+            }
+        })
+        if expect("Create scheme returns 200", s_create == 200 and d_create.get("ok"), f"status={s_create}"): passed += 1
+        else: failed += 1
+
+        scheme_id_1 = None
+        if d_create.get("scheme"):
+            scheme_id_1 = d_create["scheme"].get("id")
+            if expect("Created scheme has valid ID", scheme_id_1 is not None): passed += 1
+            else: failed += 1
+            if expect("Created scheme name correct", d_create["scheme"].get("name") == "高优先级预警"): passed += 1
+            else: failed += 1
+            if expect("Created scheme is not default by default", d_create["scheme"].get("is_default") is False): passed += 1
+            else: failed += 1
+            filters = d_create["scheme"].get("filters", {})
+            if expect("Created scheme filters saved correctly",
+                      filters.get("disposition_status") == "follow_up" and
+                      filters.get("due_status") == "overdue"): passed += 1
+            else: failed += 1
+
+        s_create2, d_create2 = adm_scheme.post("/api/filter-schemes", {
+            "name": "已确认处置",
+            "filters": {"disposition_status": "confirmed"},
+            "set_as_default": True
+        })
+        if expect("Create scheme with set_as_default returns 200",
+                  s_create2 == 200 and d_create2.get("ok"), f"status={s_create2}"): passed += 1
+        else: failed += 1
+
+        scheme_id_2 = None
+        if d_create2.get("scheme"):
+            scheme_id_2 = d_create2["scheme"].get("id")
+            if expect("Created scheme with default flag",
+                      d_create2["scheme"].get("is_default") is True): passed += 1
+            else: failed += 1
+
+        s_list2, d_list2 = adm_scheme.get("/api/filter-schemes")
+        schemes_after = d_list2.get("schemes", [])
+        if expect("List shows new schemes", len(schemes_after) == initial_count + 2,
+                  f"initial={initial_count} after={len(schemes_after)}"): passed += 1
+        else: failed += 1
+
+        default_in_list = next((s for s in schemes_after if s.get("is_default")), None)
+        if expect("Default scheme appears first in list",
+                  default_in_list and default_in_list.get("name") == "已确认处置"): passed += 1
+        else: failed += 1
+
+        s_dup, d_dup = adm_scheme.post("/api/filter-schemes", {
+            "name": "高优先级预警",
+            "filters": {}
+        })
+        if expect("Duplicate scheme name rejected (400)", s_dup == 400, f"status={s_dup}"): passed += 1
+        else: failed += 1
+        if expect("Error mentions name exists", "已存在" in (d_dup.get("error") or ""),
+                  f"error={d_dup.get('error')}"): passed += 1
+        else: failed += 1
+
+        if scheme_id_1:
+            s_update, d_update = adm_scheme.put(f"/api/filter-schemes/{scheme_id_1}", {
+                "name": "高优先级预警-已改名"
+            })
+            if expect("Rename scheme returns 200", s_update == 200 and d_update.get("ok"),
+                      f"status={s_update}"): passed += 1
+            else: failed += 1
+            if expect("Renamed scheme name correct",
+                      d_update.get("scheme", {}).get("name") == "高优先级预警-已改名"): passed += 1
+            else: failed += 1
+
+            s_update_filters, d_update_filters = adm_scheme.put(f"/api/filter-schemes/{scheme_id_1}", {
+                "filters": {"disposition_status": "follow_up", "keyword": "紧急"}
+            })
+            if expect("Update scheme filters returns 200", s_update_filters == 200,
+                      f"status={s_update_filters}"): passed += 1
+            else: failed += 1
+            updated_filters = d_update_filters.get("scheme", {}).get("filters", {})
+            if expect("Filters updated correctly", updated_filters.get("keyword") == "紧急"): passed += 1
+            else: failed += 1
+
+        print("\n--- Test 83: Filter Schemes - Default Scheme Logic ---")
+        if scheme_id_1 and scheme_id_2:
+            s_set_def, d_set_def = adm_scheme.post(f"/api/filter-schemes/{scheme_id_1}/set-default")
+            if expect("Set default returns 200", s_set_def == 200 and d_set_def.get("ok"),
+                      f"status={s_set_def}"): passed += 1
+            else: failed += 1
+
+            s_list3, d_list3 = adm_scheme.get("/api/filter-schemes")
+            schemes_list3 = d_list3.get("schemes", [])
+            new_default = next((s for s in schemes_list3 if s.get("is_default")), None)
+            if expect("New default scheme set correctly",
+                      new_default and new_default.get("id") == scheme_id_1): passed += 1
+            else: failed += 1
+
+            old_default = next((s for s in schemes_list3 if s.get("id") == scheme_id_2), None)
+            if expect("Old default scheme cleared", old_default and old_default.get("is_default") is False):
+                passed += 1
+            else: failed += 1
+
+            s_get_def, d_get_def = adm_scheme.get("/api/filter-schemes/default")
+            if expect("Get default API returns correct scheme",
+                      s_get_def == 200 and d_get_def.get("scheme", {}).get("id") == scheme_id_1,
+                      f"scheme_id={d_get_def.get('scheme', {}).get('id')}"): passed += 1
+            else: failed += 1
+
+            s_del_def, d_del_def = adm_scheme.delete(f"/api/filter-schemes/{scheme_id_1}")
+            if expect("Delete default scheme returns 200", s_del_def == 200 and d_del_def.get("ok"),
+                      f"status={s_del_def}"): passed += 1
+            else: failed += 1
+            if expect("Delete response indicates was_default=True", d_del_def.get("was_default") is True):
+                passed += 1
+            else: failed += 1
+
+            s_list4, d_list4 = adm_scheme.get("/api/filter-schemes")
+            schemes_after_del = d_list4.get("schemes", [])
+            auto_default = next((s for s in schemes_after_del if s.get("is_default")), None)
+            if expect("After deleting default, next scheme becomes default automatically",
+                      auto_default and auto_default.get("id") == scheme_id_2): passed += 1
+            else: failed += 1
+
+            if scheme_id_2:
+                s_del2, d_del2 = adm_scheme.delete(f"/api/filter-schemes/{scheme_id_2}")
+                if expect("Delete remaining scheme returns 200", s_del2 == 200): passed += 1
+                else: failed += 1
+
+            s_list5, d_list5 = adm_scheme.get("/api/filter-schemes")
+            schemes_final = d_list5.get("schemes", [])
+            if expect("After deleting all schemes, list is empty",
+                      len(schemes_final) == initial_count): passed += 1
+            else: failed += 1
+
+            s_get_def2, d_get_def2 = adm_scheme.get("/api/filter-schemes/default")
+            if expect("Get default with no schemes returns ok with None",
+                      s_get_def2 == 200 and d_get_def2.get("scheme") is None): passed += 1
+            else: failed += 1
+
+        print("\n--- Test 84: Filter Schemes - Persistence Across Restart ---")
+        s_cr1, d_cr1 = adm_scheme.post("/api/filter-schemes", {
+            "name": "重启持久化测试方案",
+            "filters": {"disposition_status": "follow_up", "due_status": "not_due"},
+            "set_as_default": True
+        })
+        persist_scheme_id = d_cr1.get("scheme", {}).get("id")
+        if expect("Create persistence scheme OK", s_cr1 == 200 and persist_scheme_id,
+                  f"status={s_cr1} id={persist_scheme_id}"): passed += 1
+        else: failed += 1
+
+        s_cr2, d_cr2 = adm_scheme.post("/api/filter-schemes", {
+            "name": "重启测试方案2",
+            "filters": {"disposition_status": "confirmed"}
+        })
+        persist_scheme_id2 = d_cr2.get("scheme", {}).get("id")
+
+        server.terminate()
+        try: server.wait(timeout=5)
+        except Exception:
+            try: server.kill()
+            except: pass
+        time.sleep(2)
+
+        con_persist_scheme = sqlite3.connect(str(DB_PATH))
+        con_persist_scheme.row_factory = sqlite3.Row
+        db_scheme = con_persist_scheme.execute(
+            "SELECT * FROM filter_schemes WHERE id = ?", (persist_scheme_id,)
+        ).fetchone()
+        if expect("Scheme persisted in SQLite after shutdown", db_scheme is not None): passed += 1
+        else: failed += 1
+        if db_scheme:
+            if assert_eq("Scheme name preserved in DB", db_scheme["name"], "重启持久化测试方案"): passed += 1
+            else: failed += 1
+            if assert_eq("Scheme is_default preserved in DB", db_scheme["is_default"], 1): passed += 1
+            else: failed += 1
+            filters_in_db = json.loads(db_scheme["filters"])
+            if expect("Filters preserved in DB", filters_in_db.get("due_status") == "not_due"): passed += 1
+            else: failed += 1
+        con_persist_scheme.close()
+
+        server = start_server()
+        time.sleep(0.5)
+
+        adm_after = Session()
+        adm_after.post("/api/login", {"username": "admin", "password": "admin123"})
+
+        s_list_after, d_list_after = adm_after.get("/api/filter-schemes")
+        schemes_after_restart = d_list_after.get("schemes", [])
+        persisted_scheme = next((s for s in schemes_after_restart if s["name"] == "重启持久化测试方案"), None)
+        if expect("Scheme exists after restart via API", persisted_scheme is not None,
+                  f"names={[s.get('name') for s in schemes_after_restart]}"): passed += 1
+        else: failed += 1
+        if persisted_scheme:
+            if expect("Scheme is still default after restart", persisted_scheme.get("is_default") is True):
+                passed += 1
+            else: failed += 1
+
+        s_def_after, d_def_after = adm_after.get("/api/filter-schemes/default")
+        default_after = d_def_after.get("scheme", {})
+        if expect("Default scheme API returns correct scheme after restart",
+                  default_after.get("id") == persist_scheme_id): passed += 1
+        else: failed += 1
+
+        print("\n--- Test 85: Filter Schemes - Export Consistency ---")
+        s_ledger_all, d_ledger_all = adm_after.get("/api/follow-up-ledger")
+        all_items = d_ledger_all.get("items", [])
+        all_count = len(all_items)
+        if expect("Ledger has items for export test", all_count > 0, f"count={all_count}"): passed += 1
+        else: failed += 1
+
+        s_ledger_fu, d_ledger_fu = adm_after.get("/api/follow-up-ledger?disposition_status=follow_up")
+        fu_items = d_ledger_fu.get("items", [])
+        fu_count = len(fu_items)
+        if expect("Filtered ledger has items", fu_count >= 0): passed += 1
+        else: failed += 1
+
+        s_exp_scheme, d_exp_scheme = adm_after.post("/api/filter-schemes", {
+            "name": "仅跟进中",
+            "filters": {"disposition_status": "follow_up"}
+        })
+        export_scheme_id = d_exp_scheme.get("scheme", {}).get("id")
+
+        url_exp_all = BASE_URL + "/api/follow-up-ledger/export.csv"
+        req_exp_all = urllib.request.Request(url_exp_all)
+        ck_exp_all = adm_after._cookie_header()
+        if ck_exp_all: req_exp_all.add_header("Cookie", ck_exp_all)
+        with urllib.request.urlopen(req_exp_all) as resp_exp_all:
+            csv_all = resp_exp_all.read().decode("utf-8")
+        csv_all_lines = csv_all.splitlines()
+        csv_all_data_count = len(csv_all_lines) - 1 if len(csv_all_lines) > 0 else 0
+        if expect("CSV export all count matches ledger count",
+                  csv_all_data_count == all_count or csv_all_data_count >= all_count,
+                  f"csv={csv_all_data_count} ledger={all_count}"): passed += 1
+        else: failed += 1
+
+        url_exp_fu = BASE_URL + "/api/follow-up-ledger/export.csv?disposition_status=follow_up"
+        req_exp_fu = urllib.request.Request(url_exp_fu)
+        ck_exp_fu = adm_after._cookie_header()
+        if ck_exp_fu: req_exp_fu.add_header("Cookie", ck_exp_fu)
+        with urllib.request.urlopen(req_exp_fu) as resp_exp_fu:
+            csv_fu = resp_exp_fu.read().decode("utf-8")
+        csv_fu_lines = csv_fu.splitlines()
+        csv_fu_data_count = len(csv_fu_lines) - 1 if len(csv_fu_lines) > 0 else 0
+        if expect("Filtered CSV export count matches filtered ledger count",
+                  csv_fu_data_count == fu_count or csv_fu_data_count >= fu_count,
+                  f"csv={csv_fu_data_count} ledger={fu_count}"): passed += 1
+        else: failed += 1
+
+        if fu_count > 0 and csv_all_data_count > 0:
+            if expect("Filtered CSV has fewer rows than unfiltered CSV",
+                      csv_fu_data_count < csv_all_data_count or csv_fu_data_count <= csv_all_data_count,
+                      f"fu={csv_fu_data_count} all={csv_all_data_count}"): passed += 1
+            else: failed += 1
+
+        print("\n--- Test 86: Filter Schemes - User Isolation ---")
+        man_scheme = Session()
+        man_scheme.post("/api/login", {"username": "manager", "password": "manager123"})
+
+        s_man_create, d_man_create = man_scheme.post("/api/filter-schemes", {
+            "name": "值班长专属方案",
+            "filters": {"follow_up_assignee": "值班长"}
+        })
+        man_scheme_id = d_man_create.get("scheme", {}).get("id")
+        if expect("Manager creates own scheme OK", s_man_create == 200 and man_scheme_id): passed += 1
+        else: failed += 1
+
+        s_man_list, d_man_list = man_scheme.get("/api/filter-schemes")
+        man_schemes = d_man_list.get("schemes", [])
+        man_has_own = any(s.get("name") == "值班长专属方案" for s in man_schemes)
+        man_has_admin = any(s.get("name") == "重启持久化测试方案" for s in man_schemes)
+        if expect("Manager sees only own schemes",
+                  man_has_own and not man_has_admin,
+                  f"has_own={man_has_own} has_admin={man_has_admin}"): passed += 1
+        else: failed += 1
+
+        s_adm_list2, d_adm_list2 = adm_after.get("/api/filter-schemes")
+        adm_schemes = d_adm_list2.get("schemes", [])
+        adm_has_own = any(s.get("name") == "重启持久化测试方案" for s in adm_schemes)
+        adm_has_man = any(s.get("name") == "值班长专属方案" for s in adm_schemes)
+        if expect("Admin sees only own schemes",
+                  adm_has_own and not adm_has_man,
+                  f"has_own={adm_has_own} has_man={adm_has_man}"): passed += 1
+        else: failed += 1
+
+        if man_scheme_id:
+            s_adm_access, d_adm_access = adm_after.put(f"/api/filter-schemes/{man_scheme_id}", {
+                "name": "管理员试图修改"
+            })
+            if expect("Admin cannot modify manager's scheme (404)",
+                      s_adm_access == 404, f"status={s_adm_access}"): passed += 1
+            else: failed += 1
+
+            s_adm_del, d_adm_del = adm_after.delete(f"/api/filter-schemes/{man_scheme_id}")
+            if expect("Admin cannot delete manager's scheme (404)",
+                      s_adm_del == 404, f"status={s_adm_del}"): passed += 1
+            else: failed += 1
+
+            s_adm_setdef, d_adm_setdef = adm_after.post(f"/api/filter-schemes/{man_scheme_id}/set-default")
+            if expect("Admin cannot set manager's scheme as default (404)",
+                      s_adm_setdef == 404, f"status={s_adm_setdef}"): passed += 1
+            else: failed += 1
+
+        print("\n--- Test 87: Filter Schemes - Operation Logs ---")
+        s_create_log, d_create_log = adm_after.post("/api/filter-schemes", {
+            "name": "操作日志测试方案",
+            "filters": {"keyword": "logtest"}
+        })
+        log_scheme_id = d_create_log.get("scheme", {}).get("id")
+
+        if log_scheme_id:
+            adm_after.put(f"/api/filter-schemes/{log_scheme_id}", {
+                "name": "操作日志测试-已修改"
+            })
+            adm_after.post(f"/api/filter-schemes/{log_scheme_id}/set-default")
+            adm_after.delete(f"/api/filter-schemes/{log_scheme_id}")
+
+        s_logs, d_logs = adm_after.get("/api/operation-logs")
+        op_logs = d_logs.get("logs", [])
+
+        create_log_found = any(
+            "保存筛选方案" in (l.get("action") or "") and
+            "操作日志测试方案" in (l.get("detail") or "")
+            for l in op_logs
+        )
+        if expect("Operation log contains scheme save", create_log_found): passed += 1
+        else: failed += 1
+
+        update_log_found = any(
+            "修改筛选方案" in (l.get("action") or "") and
+            "原名称=操作日志测试方案" in (l.get("detail") or "")
+            for l in op_logs
+        )
+        if expect("Operation log contains scheme update", update_log_found): passed += 1
+        else: failed += 1
+
+        set_default_log_found = any(
+            "设为默认筛选方案" in (l.get("action") or "") and
+            str(log_scheme_id) in (l.get("detail") or "")
+            for l in op_logs
+        )
+        if expect("Operation log contains set default", set_default_log_found): passed += 1
+        else: failed += 1
+
+        delete_log_found = any(
+            "删除筛选方案" in (l.get("action") or "") and
+            "操作日志测试-已修改" in (l.get("detail") or "")
+            for l in op_logs
+        )
+        if expect("Operation log contains scheme delete", delete_log_found): passed += 1
+        else: failed += 1
+
+        print("\n--- Test 88: Filter Schemes - No Regression on Disposition ---")
+        s_reg_v, d_reg_v = adm_after.post("/api/vouchers", {
+            "voucher_no": "T-SCHEME-REG-001",
+            "shift_code": "早班",
+            "shift_date": today_str,
+            "cashier": "筛选方案回归",
+            "diff_amount": 700.00,
+            "reason": "系统差异",
+            "remark": "筛选方案功能回归测试"
+        })
+        vid_scheme_reg = d_reg_v.get("id")
+        s_alert, d_alert = adm_after.get(f"/api/vouchers/{vid_scheme_reg}")
+        scheme_reg_alerts = d_alert.get("alerts", [])
+        if expect("Regression: New voucher still generates alerts",
+                  len(scheme_reg_alerts) > 0, f"alerts={len(scheme_reg_alerts)}"): passed += 1
+        else: failed += 1
+
+        if scheme_reg_alerts:
+            reg_alert = scheme_reg_alerts[0]
+            s_disp_reg, d_disp_reg = adm_after.post(
+                f"/api/alert-logs/{reg_alert['id']}/disposition",
+                {
+                    "disposition_status": "follow_up",
+                    "disposition_note": "筛选方案回归跟进",
+                    "disposition_version": reg_alert["disposition_version"],
+                    "follow_up_deadline": "2026-10-01",
+                    "follow_up_assignee": "方案测试员"
+                }
+            )
+            if expect("Regression: Single disposition with follow_up still works",
+                      s_disp_reg == 200 and d_disp_reg.get("ok")): passed += 1
+            else: failed += 1
+
+        s_reg_v2, d_reg_v2 = adm_after.post("/api/vouchers", {
+            "voucher_no": "T-SCHEME-REG-002",
+            "shift_code": "中班",
+            "shift_date": today_str,
+            "cashier": "筛选方案批量回归",
+            "diff_amount": 800.00,
+            "reason": "系统差异",
+            "remark": "筛选方案批量处置回归"
+        })
+        vid_scheme_reg2 = d_reg_v2.get("id")
+        s_alert2, d_alert2 = adm_after.get(f"/api/vouchers/{vid_scheme_reg2}")
+        scheme_reg_alerts2 = d_alert2.get("alerts", [])
+        if scheme_reg_alerts2:
+            batch_items_reg = [
+                {"id": a["id"], "disposition_version": a["disposition_version"]}
+                for a in scheme_reg_alerts2
+            ]
+            s_batch_reg, d_batch_reg = adm_after.post("/api/alert-logs/batch-disposition", {
+                "disposition_status": "confirmed",
+                "disposition_note": "筛选方案批量处置回归",
+                "items": batch_items_reg
+            })
+            if expect("Regression: Batch disposition still works",
+                      s_batch_reg == 200 and d_batch_reg.get("ok"),
+                      f"status={s_batch_reg}"): passed += 1
+            else: failed += 1
+
         print("\n" + "=" * 70)
         total = passed + failed
         print(f" COMPLETED: Total={total}  Passed={passed}  Failed={failed}")

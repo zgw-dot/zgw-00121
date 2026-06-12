@@ -329,6 +329,18 @@ tbody tr:hover{background:#f9fafb}
           <div class="form-group" style="margin:0">
             <button class="btn btn-outline btn-sm" onclick="resetLedgerFilters()">重置</button>
           </div>
+          <div class="form-group" style="margin:0;min-width:180px">
+            <label>我的方案</label>
+            <select id="fSchemeSelect" onchange="applyFilterScheme(this.value)">
+              <option value="">系统默认</option>
+            </select>
+          </div>
+          <div class="form-group" style="margin:0">
+            <button class="btn btn-primary btn-sm" onclick="openSaveSchemeModal()">💾 保存方案</button>
+          </div>
+          <div class="form-group" style="margin:0">
+            <button class="btn btn-outline btn-sm" onclick="openManageSchemesModal()">⚙ 管理</button>
+          </div>
           <div class="spacer"></div>
           <span id="ledgerBatchInfo" style="font-size:13px;color:#6b7280;margin-right:8px">未选择</span>
           <button class="btn btn-sm btn-success" id="ledgerBatchConfirmBtn" onclick="openLedgerBatchDisposition('confirmed')" disabled>批量确认</button>
@@ -638,6 +650,50 @@ tbody tr:hover{background:#f9fafb}
     </div>
     <div class="modal-footer">
       <button class="btn btn-primary" onclick="closeModal('importPreviewModal')">确定</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal-mask" id="saveSchemeModal">
+  <div class="modal" style="max-width:500px">
+    <div class="modal-header">
+      <h2>💾 保存筛选方案</h2>
+      <button class="close-x" onclick="closeModal('saveSchemeModal')">×</button>
+    </div>
+    <div class="modal-body">
+      <div id="saveSchemeAlert"></div>
+      <div class="form-group">
+        <label>方案名称 <span style="color:#ef4444">*</span></label>
+        <input id="schemeName" placeholder="请输入方案名称，最多50个字符" maxlength="50">
+      </div>
+      <div class="form-group">
+        <label><input type="checkbox" id="schemeSetDefault"> 设为默认方案</label>
+      </div>
+      <div class="alert alert-info" style="font-size:12px;margin-top:12px">
+        将保存当前的筛选条件：处置状态、到期状态、跟进负责人、截止日期范围、关键词
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-gray" onclick="closeModal('saveSchemeModal')">取消</button>
+      <button class="btn btn-primary" onclick="saveFilterScheme()">保存</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal-mask" id="manageSchemesModal">
+  <div class="modal" style="max-width:600px">
+    <div class="modal-header">
+      <h2>⚙ 管理筛选方案</h2>
+      <button class="close-x" onclick="closeModal('manageSchemesModal')">×</button>
+    </div>
+    <div class="modal-body">
+      <div id="manageSchemesAlert"></div>
+      <div id="schemesList" style="max-height:400px;overflow-y:auto">
+        <div class="empty">暂无方案</div>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-primary" onclick="closeModal('manageSchemesModal')">关闭</button>
     </div>
   </div>
 </div>
@@ -1738,6 +1794,9 @@ async function loadOpLogs(){
 
 let ledgerSelected = new Map();
 const LEDGER_FILTER_PREF = 'follow_up_ledger_filters';
+let filterSchemes = [];
+let currentAppliedSchemeId = null;
+let ledgerFirstLoad = true;
 
 function getLedgerFilters(){
   return {
@@ -1775,27 +1834,201 @@ async function resetLedgerFilters(){
   document.getElementById('fLedgerDeadlineFrom').value = '';
   document.getElementById('fLedgerDeadlineTo').value = '';
   document.getElementById('fLedgerKeyword').value = '';
+  currentAppliedSchemeId = null;
+  const schemeSel = document.getElementById('fSchemeSelect');
+  if(schemeSel) schemeSel.value = '';
   try{
     await api(`/api/user-preferences/${LEDGER_FILTER_PREF}`, {method:'PUT', body:{value: {}}});
   }catch(e){}
   loadFollowUpLedger();
 }
 
+async function loadFilterSchemes(){
+  const r = await api('/api/filter-schemes');
+  if(r.ok){
+    filterSchemes = r.data.schemes || [];
+    refreshSchemeSelect();
+  }
+}
+
+function refreshSchemeSelect(){
+  const sel = document.getElementById('fSchemeSelect');
+  if(!sel) return;
+  sel.innerHTML = '<option value="">系统默认</option>';
+  filterSchemes.forEach(s=>{
+    const defaultTag = s.is_default ? ' ⭐' : '';
+    sel.innerHTML += `<option value="${s.id}">${s.name}${defaultTag}</option>`;
+  });
+  if(currentAppliedSchemeId){
+    sel.value = currentAppliedSchemeId;
+  }else{
+    const defaultScheme = filterSchemes.find(s=>s.is_default);
+    if(defaultScheme && ledgerFirstLoad){
+      sel.value = defaultScheme.id;
+    }
+  }
+}
+
+async function applyFilterScheme(schemeId){
+  if(!schemeId){
+    resetLedgerFilters();
+    currentAppliedSchemeId = null;
+    return;
+  }
+  const scheme = filterSchemes.find(s=>s.id === parseInt(schemeId));
+  if(scheme){
+    applyLedgerFilters(scheme.filters);
+    currentAppliedSchemeId = scheme.id;
+    loadFollowUpLedger();
+  }
+}
+
+async function openSaveSchemeModal(){
+  document.getElementById('saveSchemeAlert').classList.add('hidden');
+  document.getElementById('schemeName').value = '';
+  document.getElementById('schemeSetDefault').checked = false;
+  openModal('saveSchemeModal');
+}
+
+async function saveFilterScheme(){
+  const name = document.getElementById('schemeName').value.trim();
+  if(!name){
+    showAlert('saveSchemeAlert','方案名称不能为空','danger');
+    return;
+  }
+  const setAsDefault = document.getElementById('schemeSetDefault').checked;
+  const filters = getLedgerFilters();
+  const r = await api('/api/filter-schemes', {
+    method:'POST',
+    body:{name, filters, set_as_default: setAsDefault}
+  });
+  if(!r.ok){
+    showAlert('saveSchemeAlert', r.error, 'danger');
+    return;
+  }
+  closeModal('saveSchemeModal');
+  await loadFilterSchemes();
+  currentAppliedSchemeId = r.data.scheme.id;
+  refreshSchemeSelect();
+}
+
+async function openManageSchemesModal(){
+  await loadFilterSchemes();
+  renderSchemesList();
+  openModal('manageSchemesModal');
+}
+
+function renderSchemesList(){
+  const container = document.getElementById('schemesList');
+  if(filterSchemes.length === 0){
+    container.innerHTML = '<div class="empty">暂无方案，点击"保存方案"创建您的第一个筛选方案</div>';
+    return;
+  }
+  container.innerHTML = filterSchemes.map(s=>`
+    <div class="rule-card" style="margin-bottom:8px">
+      <div class="rule-info">
+        <div class="rule-name">
+          ${s.name}
+          ${s.is_default ? '<span class="badge" style="background:#f59e0b;margin-left:8px">默认</span>' : ''}
+        </div>
+        <div class="rule-desc" style="font-size:12px;color:#6b7280;margin-top:4px">
+          ${formatFiltersPreview(s.filters)}
+        </div>
+        <div class="rule-meta" style="font-size:11px;color:#9ca3af;margin-top:2px">
+          创建于 ${s.created_at || ''}
+        </div>
+      </div>
+      <div class="rule-actions">
+        <button class="btn btn-sm btn-outline" onclick="renameScheme(${s.id}, '${s.name.replace(/'/g,"\\'")}')">改名</button>
+        ${!s.is_default ? `<button class="btn btn-sm btn-success" onclick="setDefaultScheme(${s.id})">设为默认</button>` : ''}
+        <button class="btn btn-sm btn-danger" onclick="deleteScheme(${s.id}, '${s.name.replace(/'/g,"\\'")}', ${s.is_default})">删除</button>
+      </div>
+    </div>
+  `).join('');
+}
+
+function formatFiltersPreview(filters){
+  if(!filters) return '无筛选条件';
+  const parts = [];
+  if(filters.disposition_status) parts.push(`处置:${DISP_STATUS_TEXT[filters.disposition_status]||filters.disposition_status}`);
+  if(filters.due_status) parts.push(`到期:${DUE_STATUS_TEXT[filters.due_status]||filters.due_status}`);
+  if(filters.follow_up_assignee) parts.push(`负责人:${filters.follow_up_assignee}`);
+  if(filters.deadline_from) parts.push(`从:${filters.deadline_from}`);
+  if(filters.deadline_to) parts.push(`至:${filters.deadline_to}`);
+  if(filters.keyword) parts.push(`关键词:${filters.keyword}`);
+  return parts.length ? parts.join(' | ') : '全部数据';
+}
+
+async function renameScheme(schemeId, oldName){
+  const newName = prompt('请输入新的方案名称：', oldName);
+  if(!newName || !newName.trim()) return;
+  if(newName.trim() === oldName) return;
+  const r = await api(`/api/filter-schemes/${schemeId}`, {
+    method:'PUT',
+    body:{name: newName.trim()}
+  });
+  if(!r.ok){
+    alert(r.error);
+    return;
+  }
+  await loadFilterSchemes();
+  renderSchemesList();
+}
+
+async function setDefaultScheme(schemeId){
+  const r = await api(`/api/filter-schemes/${schemeId}/set-default`, {method:'POST'});
+  if(!r.ok){
+    alert(r.error);
+    return;
+  }
+  await loadFilterSchemes();
+  renderSchemesList();
+  refreshSchemeSelect();
+}
+
+async function deleteScheme(schemeId, name, isDefault){
+  const msg = isDefault 
+    ? `确定要删除默认方案「${name}」吗？删除后将回到系统默认筛选。`
+    : `确定要删除方案「${name}」吗？`;
+  if(!confirm(msg)) return;
+  const r = await api(`/api/filter-schemes/${schemeId}`, {method:'DELETE'});
+  if(!r.ok){
+    alert(r.error);
+    return;
+  }
+  if(isDefault || currentAppliedSchemeId === schemeId){
+    currentAppliedSchemeId = null;
+    resetLedgerFilters();
+  }
+  await loadFilterSchemes();
+  renderSchemesList();
+}
+
 async function loadFollowUpLedger(){
-  // Try to load saved filters on first load
-  const dispEmpty = document.getElementById('fLedgerDisp').value === '';
-  const dueEmpty = document.getElementById('fLedgerDue').value === '';
-  const assigneeEmpty = document.getElementById('fLedgerAssignee').value === '';
-  const keywordEmpty = document.getElementById('fLedgerKeyword').value === '';
-  if(dispEmpty && dueEmpty && assigneeEmpty && keywordEmpty &&
-     !document.getElementById('fLedgerDeadlineFrom').value &&
-     !document.getElementById('fLedgerDeadlineTo').value){
-    try{
-      const pf = await api(`/api/user-preferences/${LEDGER_FILTER_PREF}`);
-      if(pf.ok && pf.data?.value){
-        applyLedgerFilters(pf.data.value);
+  if(ledgerFirstLoad){
+    await loadFilterSchemes();
+    const defaultScheme = filterSchemes.find(s=>s.is_default);
+    if(defaultScheme){
+      applyLedgerFilters(defaultScheme.filters);
+      currentAppliedSchemeId = defaultScheme.id;
+      refreshSchemeSelect();
+    }else{
+      const dispEmpty = document.getElementById('fLedgerDisp').value === '';
+      const dueEmpty = document.getElementById('fLedgerDue').value === '';
+      const assigneeEmpty = document.getElementById('fLedgerAssignee').value === '';
+      const keywordEmpty = document.getElementById('fLedgerKeyword').value === '';
+      if(dispEmpty && dueEmpty && assigneeEmpty && keywordEmpty &&
+         !document.getElementById('fLedgerDeadlineFrom').value &&
+         !document.getElementById('fLedgerDeadlineTo').value){
+        try{
+          const pf = await api(`/api/user-preferences/${LEDGER_FILTER_PREF}`);
+          if(pf.ok && pf.data?.value){
+            applyLedgerFilters(pf.data.value);
+          }
+        }catch(e){}
       }
-    }catch(e){}
+    }
+    ledgerFirstLoad = false;
   }
 
   const filters = getLedgerFilters();
@@ -1805,7 +2038,6 @@ async function loadFollowUpLedger(){
   const r = await api(url);
   if(!r.ok){ alert(r.error); return; }
 
-  // Populate assignee dropdown
   const assigneeSel = document.getElementById('fLedgerAssignee');
   const currentAssignee = assigneeSel.value;
   assigneeSel.innerHTML = '<option value="">全部</option>';
