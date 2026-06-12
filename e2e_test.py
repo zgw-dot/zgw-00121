@@ -2584,6 +2584,48 @@ def run():
             print(f"  {FAIL} T-BATCH-FOLLOW-001 not found in cashier voucher list")
             failed += 3
 
+        print("\n--- Test 68: CSV Header Matches Documentation Export Field List ---")
+        doc_path = APP_DIR / "使用说明.md"
+        doc_content = doc_path.read_text(encoding="utf-8")
+        in_export_section = False
+        doc_fields_line = ""
+        for line in doc_content.splitlines():
+            if "### 导出字段" in line:
+                in_export_section = True
+                continue
+            if in_export_section:
+                stripped = line.strip()
+                if stripped.startswith("###") or stripped.startswith("## "):
+                    break
+                if stripped:
+                    doc_fields_line = stripped
+                    break
+        expected_extra = ["跟进截止日期", "跟进负责人", "到期状态"]
+        all_in_doc = all(col in doc_fields_line for col in expected_extra)
+        if expect("Documentation 导出字段 lists all three follow-up columns",
+                  all_in_doc, f"doc_line={doc_fields_line[:80]}"): passed += 1
+        else: failed += 1
+
+        url_doc = BASE_URL + "/api/vouchers/export.csv"
+        req_doc = urllib.request.Request(url_doc)
+        ck_doc = man9._cookie_header()
+        if ck_doc: req_doc.add_header("Cookie", ck_doc)
+        with urllib.request.urlopen(req_doc) as resp_doc:
+            csv_doc_raw = resp_doc.read().decode("utf-8")
+        csv_header_line = csv_doc_raw.splitlines()[0] if csv_doc_raw else ""
+        all_in_csv = all(col in csv_header_line for col in expected_extra)
+        if expect("CSV export header contains all three follow-up columns",
+                  all_in_csv, f"header={csv_header_line}"): passed += 1
+        else: failed += 1
+
+        csv_cols = [c.strip().lstrip("\ufeff") for c in csv_header_line.split(",")]
+        doc_cols = [c.strip() for c in doc_fields_line.replace("、", ",").split(",") if c.strip()]
+        doc_contains_csv = all(c in doc_cols for c in csv_cols)
+        if expect("Every CSV header column is listed in documentation export fields",
+                  doc_contains_csv,
+                  f"csv_cols={csv_cols} doc_cols={doc_cols}"): passed += 1
+        else: failed += 1
+
         print("\n" + "=" * 70)
         total = passed + failed
         print(f" COMPLETED: Total={total}  Passed={passed}  Failed={failed}")
