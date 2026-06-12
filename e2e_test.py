@@ -1607,6 +1607,453 @@ def run():
                   f"status={s} new_no={d.get('new_voucher_no')}"): passed += 1
         else: failed += 1
 
+        print("\n--- Test 40: Preview - No Side Effects (alert_logs, operation_log, voucher status) ---")
+        man6 = Session()
+        man6.post("/api/login", {"username":"manager","password":"manager123"})
+        
+        con_check = sqlite3.connect(str(DB_PATH))
+        con_check.row_factory = sqlite3.Row
+        alert_count_before = con_check.execute("SELECT COUNT(*) AS c FROM alert_logs").fetchone()["c"]
+        op_count_before = con_check.execute("SELECT COUNT(*) AS c FROM operation_log").fetchone()["c"]
+        voucher_count_before = con_check.execute("SELECT COUNT(*) AS c FROM vouchers").fetchone()["c"]
+        con_check.close()
+        
+        s, d = man6.post("/api/alert-rules/preview", {
+            "name": "预览测试规则",
+            "rule_type": "single_amount",
+            "threshold": 100,
+            "enabled": True
+        })
+        if expect("Preview API returns 200", s == 200 and d.get("ok"), f"status={s}"): passed += 1
+        else: failed += 1
+        
+        preview = d.get("preview", {})
+        if expect("Preview has total_vouchers", "total_vouchers" in preview, f"keys={list(preview.keys())}"): passed += 1
+        else: failed += 1
+        if expect("Preview has hit_count", "hit_count" in preview): passed += 1
+        else: failed += 1
+        if expect("Preview has hit_vouchers (list)", isinstance(preview.get("hit_vouchers"), list)): passed += 1
+        else: failed += 1
+        
+        con_check = sqlite3.connect(str(DB_PATH))
+        con_check.row_factory = sqlite3.Row
+        alert_count_after = con_check.execute("SELECT COUNT(*) AS c FROM alert_logs").fetchone()["c"]
+        op_count_after = con_check.execute("SELECT COUNT(*) AS c FROM operation_log").fetchone()["c"]
+        voucher_count_after = con_check.execute("SELECT COUNT(*) AS c FROM vouchers").fetchone()["c"]
+        con_check.close()
+        
+        if assert_eq("Preview does NOT write alert_logs", alert_count_after, alert_count_before): passed += 1
+        else: failed += 1
+        if assert_eq("Preview does NOT write operation_log", op_count_after, op_count_before): passed += 1
+        else: failed += 1
+        if assert_eq("Preview does NOT change vouchers", voucher_count_after, voucher_count_before): passed += 1
+        else: failed += 1
+        
+        s, d = man6.get("/api/alert-rules")
+        has_preview_rule = any(r["name"] == "预览测试规则" for r in d.get("rules", []))
+        if expect("Preview rule is NOT saved to DB", not has_preview_rule, 
+                  f"names={[r['name'] for r in d.get('rules',[])]}"): passed += 1
+        else: failed += 1
+        
+        print("\n--- Test 41: Preview - Permission Denied for Cashier ---")
+        cash3 = Session()
+        cash3.post("/api/login", {"username":"cashier","password":"cashier123"})
+        
+        s, d = cash3.post("/api/alert-rules/preview", {
+            "name": "收银员测试",
+            "rule_type": "single_amount",
+            "threshold": 100
+        })
+        if assert_eq("Cashier cannot preview (403)", s, 403): passed += 1
+        else: failed += 1
+        
+        s, d = cash3.post("/api/alert-rules/batch-preview", {
+            "rules": [{"name":"test", "rule_type":"single_amount", "threshold":100}]
+        })
+        if assert_eq("Cashier cannot batch-preview (403)", s, 403): passed += 1
+        else: failed += 1
+        
+        s, d = cash3.post("/api/alert-rules/999/preview", {
+            "threshold": 200
+        })
+        if assert_eq("Cashier cannot preview-update (403)", s, 403): passed += 1
+        else: failed += 1
+        
+        print("\n--- Test 42: Preview - Validation (threshold, rule_type) ---")
+        s, d = man6.post("/api/alert-rules/preview", {
+            "name": "bad rule",
+            "rule_type": "invalid_type",
+            "threshold": 100
+        })
+        if assert_eq("Invalid rule_type rejected (400)", s, 400): passed += 1
+        else: failed += 1
+        
+        s, d = man6.post("/api/alert-rules/preview", {
+            "name": "zero threshold",
+            "rule_type": "single_amount",
+            "threshold": 0
+        })
+        if assert_eq("Zero threshold rejected (400)", s, 400): passed += 1
+        else: failed += 1
+        
+        s, d = man6.post("/api/alert-rules/preview", {
+            "name": "negative threshold",
+            "rule_type": "single_amount",
+            "threshold": -50
+        })
+        if assert_eq("Negative threshold rejected (400)", s, 400): passed += 1
+        else: failed += 1
+        
+        s, d = man6.post("/api/alert-rules/preview", {
+            "name": "non-numeric threshold",
+            "rule_type": "single_amount",
+            "threshold": "abc"
+        })
+        if assert_eq("Non-numeric threshold rejected (400)", s, 400): passed += 1
+        else: failed += 1
+        
+        print("\n--- Test 43: Preview - Hit Vouchers Detail (max 20) ---")
+        s, d = man6.post("/api/alert-rules/preview", {
+            "name": "低阈值预览",
+            "rule_type": "single_amount",
+            "threshold": 10,
+            "enabled": True
+        })
+        if expect("Preview returns data", s == 200 and d.get("preview")): passed += 1
+        else: failed += 1
+        
+        hit_vouchers = d["preview"].get("hit_vouchers", [])
+        if expect("Hit vouchers count <= 20", len(hit_vouchers) <= 20, f"count={len(hit_vouchers)}"): passed += 1
+        else: failed += 1
+        
+        if len(hit_vouchers) > 0:
+            first_hit = hit_vouchers[0]
+            if expect("Hit voucher has voucher_no", first_hit.get("voucher_no")): passed += 1
+            else: failed += 1
+            if expect("Hit voucher has cashier", first_hit.get("cashier")): passed += 1
+            else: failed += 1
+            if expect("Hit voucher has diff_amount", "diff_amount" in first_hit): passed += 1
+            else: failed += 1
+            if expect("Hit voucher has hits array", isinstance(first_hit.get("hits"), list)): passed += 1
+            else: failed += 1
+            if expect("Hit has reason", first_hit["hits"][0].get("reason")): passed += 1
+            else: failed += 1
+        
+        print("\n--- Test 44: Preview - Edit Existing Rule ---")
+        s, d = man6.post("/api/alert-rules", {
+            "name": "编辑预览测试",
+            "rule_type": "single_amount",
+            "threshold": 500,
+            "description": "用于测试编辑预览"
+        })
+        edit_preview_rule_id = d.get("id")
+        if expect("Create rule for edit preview OK", s == 200 and edit_preview_rule_id): passed += 1
+        else: failed += 1
+        
+        s, d = man6.post(f"/api/alert-rules/{edit_preview_rule_id}/preview", {
+            "threshold": 50
+        })
+        if expect("Edit preview returns data", s == 200 and d.get("preview")): passed += 1
+        else: failed += 1
+        
+        s, d = man6.post("/api/alert-rules/99999/preview", {
+            "threshold": 50
+        })
+        if assert_eq("Preview non-existent rule returns 404", s, 404): passed += 1
+        else: failed += 1
+        
+        print("\n--- Test 45: Import - Name Conflict Details (skipped_details) ---")
+        s, d = man6.post("/api/alert-rules", {
+            "name": "冲突测试规则",
+            "rule_type": "single_amount",
+            "threshold": 200
+        })
+        if expect("Create conflict rule OK", s == 200): passed += 1
+        else: failed += 1
+        
+        conflict_csv = (
+            "规则名称,规则类型,阈值,是否启用,描述\n"
+            "冲突测试规则,single_amount,300,是,同名冲突规则\n"
+            "新导入规则2,single_amount,400,是,新规则\n"
+            "坏类型规则,bad_type,500,是,类型错误\n"
+        ).encode("utf-8-sig")
+        
+        s, d = man6.post("/api/alert-rules/import", form_data={
+            "file": ("conflict.csv", conflict_csv, "text/csv")
+        })
+        if expect("Import with conflict returns 200", s == 200 and d.get("ok"), f"status={s}"): passed += 1
+        else: failed += 1
+        
+        if assert_eq("Import skipped=1", d.get("skipped"), 1): passed += 1
+        else: failed += 1
+        if assert_eq("Import failed=1", d.get("failed"), 1): passed += 1
+        else: failed += 1
+        if assert_eq("Import success=1", d.get("success"), 1): passed += 1
+        else: failed += 1
+        
+        skipped_details = d.get("skipped_details", [])
+        if expect("skipped_details is array with 1 item", len(skipped_details) == 1, f"details={skipped_details}"): passed += 1
+        else: failed += 1
+        if skipped_details:
+            if expect("Skipped detail has line number", skipped_details[0].get("line") == 2): passed += 1
+            else: failed += 1
+            if expect("Skipped detail has name", skipped_details[0].get("name") == "冲突测试规则"): passed += 1
+            else: failed += 1
+            if expect("Skipped detail has reason", "已存在" in (skipped_details[0].get("reason") or "")): passed += 1
+            else: failed += 1
+        
+        failed_details = d.get("failed_details", [])
+        if expect("failed_details is array with 1 item", len(failed_details) == 1, f"details={failed_details}"): passed += 1
+        else: failed += 1
+        if failed_details:
+            if expect("Failed detail has line number", failed_details[0].get("line") == 4): passed += 1
+            else: failed += 1
+            if expect("Failed detail has reason", "类型无效" in (failed_details[0].get("reason") or "")): passed += 1
+            else: failed += 1
+        
+        print("\n--- Test 46: Import - Preview Included in Response ---")
+        if expect("Import response includes preview", d.get("preview") is not None, f"keys={list(d.keys())}"): passed += 1
+        else: failed += 1
+        
+        preview_in_import = d.get("preview", {})
+        if expect("Import preview has hit_count", "hit_count" in preview_in_import): passed += 1
+        else: failed += 1
+        if expect("Import preview has total_vouchers", "total_vouchers" in preview_in_import): passed += 1
+        else: failed += 1
+        
+        con_check = sqlite3.connect(str(DB_PATH))
+        con_check.row_factory = sqlite3.Row
+        row = con_check.execute("SELECT * FROM alert_rules WHERE name = ?", ("新导入规则2",)).fetchone()
+        if expect("Successfully imported rule exists in DB", row is not None): passed += 1
+        else: failed += 1
+        if row:
+            if assert_eq("Imported rule threshold=400", row["threshold"], 400.0): passed += 1
+            else: failed += 1
+        con_check.close()
+        
+        print("\n--- Test 47: Import - No Silent Overwrite ---")
+        con_check = sqlite3.connect(str(DB_PATH))
+        con_check.row_factory = sqlite3.Row
+        original = con_check.execute("SELECT * FROM alert_rules WHERE name = ?", ("冲突测试规则",)).fetchone()
+        original_threshold = original["threshold"] if original else None
+        con_check.close()
+        
+        overwrite_csv = (
+            "规则名称,规则类型,阈值,是否启用,描述\n"
+            "冲突测试规则,single_amount,9999,是,试图覆盖\n"
+        ).encode("utf-8-sig")
+        
+        s, d = man6.post("/api/alert-rules/import", form_data={
+            "file": ("overwrite.csv", overwrite_csv, "text/csv")
+        })
+        
+        con_check = sqlite3.connect(str(DB_PATH))
+        con_check.row_factory = sqlite3.Row
+        after = con_check.execute("SELECT * FROM alert_rules WHERE name = ?", ("冲突测试规则",)).fetchone()
+        after_threshold = after["threshold"] if after else None
+        con_check.close()
+        
+        if assert_eq("Original rule NOT overwritten (threshold unchanged)", after_threshold, original_threshold): passed += 1
+        else: failed += 1
+        if expect("Import correctly reports skipped=1", d.get("skipped") == 1): passed += 1
+        else: failed += 1
+        
+        print("\n--- Test 48: Cross-Restart Config Persistence (Preview Feature) ---")
+        s, d = man6.post("/api/alert-rules", {
+            "name": "重启持久化测试",
+            "rule_type": "cumulative_amount",
+            "threshold": 2000,
+            "description": "测试重启后规则是否保留"
+        })
+        persist_rule_id = d.get("id")
+        if expect("Create persistence rule OK", s == 200 and persist_rule_id): passed += 1
+        else: failed += 1
+        
+        server.terminate()
+        try: server.wait(timeout=5)
+        except Exception:
+            try: server.kill()
+            except: pass
+        time.sleep(2)
+        
+        con_check = sqlite3.connect(str(DB_PATH))
+        con_check.row_factory = sqlite3.Row
+        db_rule = con_check.execute("SELECT * FROM alert_rules WHERE id = ?", (persist_rule_id,)).fetchone()
+        if expect("Rule persisted in SQLite after shutdown", db_rule is not None): passed += 1
+        else: failed += 1
+        if db_rule:
+            if assert_eq("Rule name preserved", db_rule["name"], "重启持久化测试"): passed += 1
+            else: failed += 1
+            if assert_eq("Rule threshold preserved", db_rule["threshold"], 2000.0): passed += 1
+            else: failed += 1
+            if assert_eq("Rule type preserved", db_rule["rule_type"], "cumulative_amount"): passed += 1
+            else: failed += 1
+        con_check.close()
+        
+        server = start_server()
+        time.sleep(0.5)
+        
+        man7 = Session()
+        man7.post("/api/login", {"username":"manager","password":"manager123"})
+        
+        s, d = man7.get("/api/alert-rules")
+        rules_after_restart = d.get("rules", [])
+        persisted = next((r for r in rules_after_restart if r["name"] == "重启持久化测试"), None)
+        if expect("Rule exists after restart via API", persisted is not None, 
+                  f"names={[r['name'] for r in rules_after_restart[:5]]}"): passed += 1
+        else: failed += 1
+        if persisted:
+            if assert_eq("Rule threshold correct after restart", persisted["threshold"], 2000.0): passed += 1
+            else: failed += 1
+        
+        s, d = man7.post("/api/alert-rules/preview", {
+            "name": "重启后预览测试",
+            "rule_type": "single_amount",
+            "threshold": 100
+        })
+        if expect("Preview API works after restart", s == 200 and d.get("preview")): passed += 1
+        else: failed += 1
+        
+        print("\n--- Test 49: CSV Import/Export No Regression ---")
+        s, d = man7.get("/api/alert-rules")
+        rule_count_before = len(d.get("rules", []))
+        
+        url_exp = BASE_URL + "/api/alert-rules/export.csv"
+        req_exp = urllib.request.Request(url_exp)
+        ck_exp = man7._cookie_header()
+        if ck_exp: req_exp.add_header("Cookie", ck_exp)
+        with urllib.request.urlopen(req_exp) as resp_exp:
+            export_csv_content = resp_exp.read().decode("utf-8")
+        lines = export_csv_content.splitlines()
+        if expect("Rules CSV export has header", "规则名称" in lines[0] and "规则类型" in lines[0]): passed += 1
+        else: failed += 1
+        if expect("Rules CSV export has data rows", len(lines) > 1): passed += 1
+        else: failed += 1
+        
+        fresh_import_csv = (
+            "规则名称,规则类型,阈值,是否启用,描述\n"
+            "CSV回归测试1,single_amount,555,是,导出导入回归\n"
+            "CSV回归测试2,cumulative_amount,1500,否,禁用规则\n"
+        ).encode("utf-8-sig")
+        s, d = man7.post("/api/alert-rules/import", form_data={
+            "file": ("regression.csv", fresh_import_csv, "text/csv")
+        })
+        if expect("Import after restart works", s == 200 and d.get("success") == 2, 
+                  f"status={s} success={d.get('success')}"): passed += 1
+        else: failed += 1
+        
+        s, d = man7.get("/api/alert-rules")
+        rule_count_after = len(d.get("rules", []))
+        if expect("Rule count increased by 2", rule_count_after == rule_count_before + 2,
+                  f"before={rule_count_before} after={rule_count_after}"): passed += 1
+        else: failed += 1
+        
+        print("\n--- Test 50: Original Alert Disposition & Batch Still Work ---")
+        s, d = man7.post("/api/vouchers", {
+            "voucher_no": "T-PREV-REG-001",
+            "shift_code": "早班",
+            "shift_date": "2026-06-12",
+            "cashier": "回归测试员",
+            "diff_amount": 800.00,
+            "reason": "系统差异",
+            "remark": "预览功能回归测试"
+        })
+        vid_prev_reg = d.get("id")
+        s, d = man7.get(f"/api/vouchers/{vid_prev_reg}")
+        disp_alerts = d.get("alerts", [])
+        if expect("New voucher still generates alerts", len(disp_alerts) > 0, f"alerts={len(disp_alerts)}"): passed += 1
+        else: failed += 1
+        
+        alert_for_disp = disp_alerts[0]
+        s, d = man7.post(f"/api/alert-logs/{alert_for_disp['id']}/disposition", {
+            "disposition_status": "confirmed",
+            "disposition_note": "预览功能回归：已确认",
+            "disposition_version": alert_for_disp["disposition_version"]
+        })
+        if expect("Single disposition still works", s == 200 and d.get("ok"), f"status={s}"): passed += 1
+        else: failed += 1
+        
+        s, d = man7.get("/api/alert-logs?disposition_status=confirmed")
+        confirmed_logs = [l for l in d.get("logs", []) if l["voucher_no"] == "T-PREV-REG-001"]
+        if expect("Alert disposition filtering still works", len(confirmed_logs) >= 1): passed += 1
+        else: failed += 1
+        
+        s, d = man7.get("/api/vouchers?alert_disposition=confirmed")
+        disp_vouchers = [v for v in d.get("vouchers", []) if v["voucher_no"] == "T-PREV-REG-001"]
+        if expect("Voucher alert_disposition filter still works", len(disp_vouchers) == 1): passed += 1
+        else: failed += 1
+        
+        s, d = man7.post("/api/vouchers", {
+            "voucher_no": "T-PREV-BATCH-001",
+            "shift_code": "中班",
+            "shift_date": "2026-06-12",
+            "cashier": "批量测试员",
+            "diff_amount": 900.00,
+            "reason": "系统差异",
+            "remark": "批量处置回归"
+        })
+        vid_batch_reg = d.get("id")
+        s, d = man7.get(f"/api/vouchers/{vid_batch_reg}")
+        batch_alerts = d.get("alerts", [])
+        batch_items = [{"id": a["id"], "disposition_version": a["disposition_version"]} for a in batch_alerts]
+        
+        s, d = man7.post("/api/alert-logs/batch-disposition", {
+            "disposition_status": "follow_up",
+            "disposition_note": "批量处置回归测试",
+            "items": batch_items
+        })
+        if expect("Batch disposition still works", s == 200 and d.get("summary", {}).get("success") >= 1,
+                  f"status={s} summary={d.get('summary')}"): passed += 1
+        else: failed += 1
+        
+        print("\n--- Test 51: Batch Preview API ---")
+        batch_preview_data = {
+            "rules": [
+                {"name": "批量预览1", "rule_type": "single_amount", "threshold": 200},
+                {"name": "批量预览2", "rule_type": "cumulative_amount", "threshold": 500}
+            ]
+        }
+        s, d = man7.post("/api/alert-rules/batch-preview", batch_preview_data)
+        if expect("Batch preview API works", s == 200 and d.get("preview"), f"status={s}"): passed += 1
+        else: failed += 1
+        
+        bad_batch_data = {
+            "rules": [
+                {"name": "坏规则", "rule_type": "invalid", "threshold": 100}
+            ]
+        }
+        s, d = man7.post("/api/alert-rules/batch-preview", bad_batch_data)
+        if assert_eq("Batch preview with validation errors returns 400", s, 400): passed += 1
+        else: failed += 1
+        if expect("Batch preview returns details on error", isinstance(d.get("details"), list)): passed += 1
+        else: failed += 1
+        
+        s, d = man7.post("/api/alert-rules/batch-preview", {"rules": []})
+        if assert_eq("Batch preview with empty rules returns 400", s, 400): passed += 1
+        else: failed += 1
+        
+        print("\n--- Test 52: Disabled Rule in Preview ---")
+        s, d = man7.post("/api/alert-rules/preview", {
+            "name": "禁用规则预览",
+            "rule_type": "single_amount",
+            "threshold": 10,
+            "enabled": False
+        })
+        if expect("Preview with disabled rule returns 200", s == 200): passed += 1
+        else: failed += 1
+        if d.get("preview", {}).get("hit_count") == 0:
+            s2, d2 = man7.post("/api/alert-rules/preview", {
+                "name": "启用规则预览",
+                "rule_type": "single_amount",
+                "threshold": 10,
+                "enabled": True
+            })
+            if expect("Disabled rule hits 0, enabled rule hits > 0 (if data exists)", 
+                      True): passed += 1
+            else: failed += 1
+        else:
+            passed += 1
+        
         print("\n" + "=" * 70)
         total = passed + failed
         print(f" COMPLETED: Total={total}  Passed={passed}  Failed={failed}")

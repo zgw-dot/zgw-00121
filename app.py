@@ -985,6 +985,38 @@ RULE_TYPE_LABELS = {
 }
 
 
+def _check_single_rule_hit(db, rule, voucher_no, voucher_id, cashier, diff_amount, shift_date):
+    hit = False
+    reason = ""
+
+    if rule["rule_type"] == RULE_TYPE_SINGLE:
+        if abs(diff_amount) >= rule["threshold"]:
+            hit = True
+            reason = f"单笔差异金额 ¥{abs(diff_amount):.2f} ≥ 阈值 ¥{rule['threshold']:.2f}"
+
+    elif rule["rule_type"] == RULE_TYPE_CUMULATIVE:
+        row = db.execute("""
+            SELECT COALESCE(SUM(ABS(diff_amount)), 0) AS total
+            FROM vouchers
+            WHERE cashier = ? AND shift_date = ? AND status != 'revoked'
+        """, (cashier, shift_date)).fetchone()
+        cumulative = row["total"]
+        if cumulative >= rule["threshold"]:
+            hit = True
+            reason = f"收银员 {cashier} 当天累计差异 ¥{cumulative:.2f} ≥ 阈值 ¥{rule['threshold']:.2f}"
+
+    elif rule["rule_type"] == RULE_TYPE_CONSECUTIVE_RETURN:
+        returned_count = db.execute("""
+            SELECT COUNT(*) AS cnt FROM vouchers
+            WHERE cashier = ? AND status = 'returned'
+        """, (cashier,)).fetchone()["cnt"]
+        if returned_count >= int(rule["threshold"]):
+            hit = True
+            reason = f"收银员 {cashier} 退回次数 {returned_count} ≥ 阈值 {int(rule['threshold'])}"
+
+    return hit, reason
+
+
 def check_alert_rules(db, voucher_no, voucher_id, cashier, diff_amount, shift_date, cur):
     rules = db.execute(
         "SELECT * FROM alert_rules WHERE enabled = 1"
@@ -993,34 +1025,7 @@ def check_alert_rules(db, voucher_no, voucher_id, cashier, diff_amount, shift_da
     triggered = []
 
     for rule in rules:
-        hit = False
-        reason = ""
-
-        if rule["rule_type"] == RULE_TYPE_SINGLE:
-            if abs(diff_amount) >= rule["threshold"]:
-                hit = True
-                reason = f"单笔差异金额 ¥{abs(diff_amount):.2f} ≥ 阈值 ¥{rule['threshold']:.2f}"
-
-        elif rule["rule_type"] == RULE_TYPE_CUMULATIVE:
-            row = db.execute("""
-                SELECT COALESCE(SUM(ABS(diff_amount)), 0) AS total
-                FROM vouchers
-                WHERE cashier = ? AND shift_date = ? AND status != 'revoked'
-            """, (cashier, shift_date)).fetchone()
-            cumulative = row["total"]
-            if cumulative >= rule["threshold"]:
-                hit = True
-                reason = f"收银员 {cashier} 当天累计差异 ¥{cumulative:.2f} ≥ 阈值 ¥{rule['threshold']:.2f}"
-
-        elif rule["rule_type"] == RULE_TYPE_CONSECUTIVE_RETURN:
-            returned_count = db.execute("""
-                SELECT COUNT(*) AS cnt FROM vouchers
-                WHERE cashier = ? AND status = 'returned'
-            """, (cashier,)).fetchone()["cnt"]
-            if returned_count >= int(rule["threshold"]):
-                hit = True
-                reason = f"收银员 {cashier} 退回次数 {returned_count} ≥ 阈值 {int(rule['threshold'])}"
-
+        hit, reason = _check_single_rule_hit(db, rule, voucher_no, voucher_id, cashier, diff_amount, shift_date)
         if hit:
             existing = db.execute("""
                 SELECT id FROM alert_logs WHERE voucher_no = ? AND rule_id = ?
@@ -1041,12 +1046,87 @@ def check_alert_rules(db, voucher_no, voucher_id, cashier, diff_amount, shift_da
     return triggered
 
 
+def preview_alert_rules(db, rules_to_test):
+    all_vouchers = db.execute("""
+        SELECT id, voucher_no, cashier, diff_amount, shift_date, status
+        FROM vouchers
+        WHERE status != 'revoked'
+        ORDER BY id DESC
+    """).fetchall()
+
+    hit_count = 0
+    hit_vouchers = []
+
+    for v in all_vouchers:
+        voucher_hits = []
+        for rule in rules_to_test:
+            if not rule.get("enabled", True):
+                continue
+            hit, reason = _check_single_rule_hit(
+                db, rule, v["voucher_no"], v["id"],
+                v["cashier"], v["diff_amount"], v["shift_date"]
+            )
+            if hit:
+                voucher_hits.append({
+                    "rule_name": rule["name"],
+                    "rule_type": rule["rule_type"],
+                    "reason": reason
+                })
+        if voucher_hits:
+            hit_count += 1
+            if len(hit_vouchers) < 20:
+                hit_vouchers.append({
+                    "voucher_no": v["voucher_no"],
+                    "cashier": v["cashier"],
+                    "diff_amount": v["diff_amount"],
+                    "status": v["status"],
+                    "hits": voucher_hits
+                })
+
+    return {
+        "total_vouchers": len(all_vouchers),
+        "hit_count": hit_count,
+        "hit_vouchers": hit_vouchers
+    }
+
+
 def get_voucher_alerts(db, voucher_no):
     rows = db.execute(
         "SELECT * FROM alert_logs WHERE voucher_no = ? ORDER BY id ASC",
         (voucher_no,)
     ).fetchall()
     return [row_to_dict(r) for r in rows]
+
+
+def validate_alert_rule_payload(data, is_preview=False):
+    errors = []
+    name = (data.get("name") or "").strip()
+    rule_type = (data.get("rule_type") or "").strip()
+    threshold = data.get("threshold")
+
+    if not name and not is_preview:
+        errors.append("规则名称不能为空")
+    if rule_type not in (RULE_TYPE_SINGLE, RULE_TYPE_CUMULATIVE, RULE_TYPE_CONSECUTIVE_RETURN):
+        errors.append(f"规则类型无效，可选：{','.join(RULE_TYPE_LABELS.keys())}")
+    if threshold is None:
+        errors.append("阈值不能为空")
+    else:
+        try:
+            threshold = float(threshold)
+        except (TypeError, ValueError):
+            errors.append("阈值必须是数字")
+            threshold = 0
+        if threshold <= 0:
+            errors.append("阈值必须大于0")
+
+    return {
+        "name": name,
+        "rule_type": rule_type,
+        "threshold": threshold if isinstance(threshold, (int, float)) else 0,
+        "description": (data.get("description") or "").strip(),
+        "enabled": 1 if data.get("enabled", True) else 0,
+        "_errors": errors
+    }
 
 
 @app.route("/api/import_logs")
@@ -1067,28 +1147,70 @@ def api_list_alert_rules():
     return jsonify({"rules": [row_to_dict(r) for r in rows]})
 
 
+@app.route("/api/alert-rules/preview", methods=["POST"])
+@role_required(ROLE_ADMIN, ROLE_MANAGER)
+def api_preview_alert_rule():
+    data = request.get_json(force=True, silent=True) or {}
+    payload = validate_alert_rule_payload(data, is_preview=True)
+    if payload["_errors"]:
+        return jsonify({"error": payload["_errors"][0]}), 400
+
+    db = get_db()
+    rules_to_test = [{
+        "name": payload["name"] or "预览规则",
+        "rule_type": payload["rule_type"],
+        "threshold": payload["threshold"],
+        "enabled": payload["enabled"]
+    }]
+
+    result = preview_alert_rules(db, rules_to_test)
+    return jsonify({
+        "ok": True,
+        "preview": result
+    })
+
+
+@app.route("/api/alert-rules/batch-preview", methods=["POST"])
+@role_required(ROLE_ADMIN, ROLE_MANAGER)
+def api_batch_preview_alert_rules():
+    data = request.get_json(force=True, silent=True) or {}
+    rules_data = data.get("rules", [])
+    if not rules_data:
+        return jsonify({"error": "未提供规则数据"}), 400
+
+    db = get_db()
+    valid_rules = []
+    errors = []
+
+    for i, rule_data in enumerate(rules_data, start=1):
+        payload = validate_alert_rule_payload(rule_data, is_preview=True)
+        if payload["_errors"]:
+            errors.append(f"第{i}条规则：{payload['_errors'][0]}")
+            continue
+        valid_rules.append({
+            "name": payload["name"] or f"规则{i}",
+            "rule_type": payload["rule_type"],
+            "threshold": payload["threshold"],
+            "enabled": payload["enabled"]
+        })
+
+    if errors:
+        return jsonify({"error": "规则校验失败", "details": errors}), 400
+
+    result = preview_alert_rules(db, valid_rules)
+    return jsonify({
+        "ok": True,
+        "preview": result
+    })
+
+
 @app.route("/api/alert-rules", methods=["POST"])
 @role_required(ROLE_ADMIN, ROLE_MANAGER)
 def api_create_alert_rule():
     data = request.get_json(force=True, silent=True) or {}
-    name = (data.get("name") or "").strip()
-    rule_type = (data.get("rule_type") or "").strip()
-    threshold = data.get("threshold")
-    description = (data.get("description") or "").strip()
-    enabled = 1 if data.get("enabled", True) else 0
-
-    if not name:
-        return jsonify({"error": "规则名称不能为空"}), 400
-    if rule_type not in (RULE_TYPE_SINGLE, RULE_TYPE_CUMULATIVE, RULE_TYPE_CONSECUTIVE_RETURN):
-        return jsonify({"error": f"规则类型无效，可选：{','.join(RULE_TYPE_LABELS.keys())}"}), 400
-    if threshold is None:
-        return jsonify({"error": "阈值不能为空"}), 400
-    try:
-        threshold = float(threshold)
-    except (TypeError, ValueError):
-        return jsonify({"error": "阈值必须是数字"}), 400
-    if threshold <= 0:
-        return jsonify({"error": "阈值必须大于0"}), 400
+    payload = validate_alert_rule_payload(data)
+    if payload["_errors"]:
+        return jsonify({"error": payload["_errors"][0]}), 400
 
     user = current_user()
     db = get_db()
@@ -1097,15 +1219,56 @@ def api_create_alert_rule():
         cur.execute("""
             INSERT INTO alert_rules (name, rule_type, threshold, enabled, description, created_by)
             VALUES (?, ?, ?, ?, ?, ?)
-        """, (name, rule_type, threshold, enabled, description, user["username"]))
+        """, (payload["name"], payload["rule_type"], payload["threshold"],
+              payload["enabled"], payload["description"], user["username"]))
         rule_id = cur.lastrowid
         add_operation_log(cur, "创建预警规则", user["username"], user["role"],
-                         f"规则名={name}, 类型={rule_type}, 阈值={threshold}")
+                         f"规则名={payload['name']}, 类型={payload['rule_type']}, 阈值={payload['threshold']}")
         db.commit()
     except sqlite3.IntegrityError:
         return jsonify({"error": "规则名称已存在"}), 400
 
     return jsonify({"ok": True, "id": rule_id})
+
+
+@app.route("/api/alert-rules/<int:rule_id>/preview", methods=["POST"])
+@role_required(ROLE_ADMIN, ROLE_MANAGER)
+def api_preview_update_alert_rule(rule_id):
+    data = request.get_json(force=True, silent=True) or {}
+    db = get_db()
+    existing = db.execute("SELECT * FROM alert_rules WHERE id = ?", (rule_id,)).fetchone()
+    if not existing:
+        return jsonify({"error": "规则不存在"}), 404
+
+    name = (data.get("name") or existing["name"]).strip()
+    rule_type = (data.get("rule_type") or existing["rule_type"]).strip()
+    threshold = data.get("threshold")
+    if threshold is not None:
+        try:
+            threshold = float(threshold)
+        except (TypeError, ValueError):
+            return jsonify({"error": "阈值必须是数字"}), 400
+        if threshold <= 0:
+            return jsonify({"error": "阈值必须大于0"}), 400
+    else:
+        threshold = existing["threshold"]
+    enabled = 1 if data.get("enabled", bool(existing["enabled"])) else 0
+
+    if rule_type not in (RULE_TYPE_SINGLE, RULE_TYPE_CUMULATIVE, RULE_TYPE_CONSECUTIVE_RETURN):
+        return jsonify({"error": "规则类型无效"}), 400
+
+    rules_to_test = [{
+        "name": name,
+        "rule_type": rule_type,
+        "threshold": threshold,
+        "enabled": enabled
+    }]
+
+    result = preview_alert_rules(db, rules_to_test)
+    return jsonify({
+        "ok": True,
+        "preview": result
+    })
 
 
 @app.route("/api/alert-rules/<int:rule_id>", methods=["PUT"])
@@ -1229,8 +1392,11 @@ def api_import_alert_rules_csv():
     skipped = 0
     failed = 0
     details = []
+    skipped_details = []
+    failed_details = []
+    valid_rules_for_preview = []
 
-    for i, row in enumerate(reader, start=1):
+    for i, row in enumerate(reader, start=2):
         total += 1
         try:
             name = col(row, "规则名称", "name")
@@ -1259,8 +1425,21 @@ def api_import_alert_rules_csv():
             existing = cur.execute("SELECT id FROM alert_rules WHERE name = ?", (name,)).fetchone()
             if existing:
                 skipped += 1
-                details.append(f"第{i}行：规则名称「{name}」已存在，跳过")
+                skip_msg = f"第{i}行：规则名称「{name}」已存在，跳过"
+                details.append(skip_msg)
+                skipped_details.append({
+                    "line": i,
+                    "name": name,
+                    "reason": "规则名称已存在"
+                })
                 continue
+
+            valid_rules_for_preview.append({
+                "name": name,
+                "rule_type": rule_type,
+                "threshold": threshold,
+                "enabled": enabled
+            })
 
             cur.execute("""
                 INSERT INTO alert_rules (name, rule_type, threshold, enabled, description, created_by)
@@ -1269,7 +1448,17 @@ def api_import_alert_rules_csv():
             success += 1
         except ValueError as e:
             failed += 1
-            details.append(f"第{i}行：{str(e)}")
+            fail_msg = f"第{i}行：{str(e)}"
+            details.append(fail_msg)
+            failed_details.append({
+                "line": i,
+                "name": col(row, "规则名称", "name") or f"未命名{i}",
+                "reason": str(e)
+            })
+
+    preview_result = None
+    if valid_rules_for_preview:
+        preview_result = preview_alert_rules(db, valid_rules_for_preview)
 
     add_operation_log(cur, "导入预警规则", user["username"], user["role"],
                      f"文件={filename}, 总数={total}, 成功={success}, 跳过={skipped}, 失败={failed}")
@@ -1281,7 +1470,10 @@ def api_import_alert_rules_csv():
         "success": success,
         "skipped": skipped,
         "failed": failed,
-        "details": details
+        "details": details,
+        "skipped_details": skipped_details,
+        "failed_details": failed_details,
+        "preview": preview_result
     })
 
 
