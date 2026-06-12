@@ -140,6 +140,7 @@ tbody tr:hover{background:#f9fafb}
       <button class="tab active" onclick="switchTab('vouchers')">📋 单据管理</button>
       <button class="tab" onclick="switchTab('alertPanel')">🚨 异常预警</button>
       {% if user.role in ['admin','manager'] %}
+      <button class="tab" onclick="switchTab('followUpLedger')">📒 跟进台账</button>
       <button class="tab" onclick="switchTab('opLogs')">📜 操作日志</button>
       {% endif %}
     </div>
@@ -278,6 +279,83 @@ tbody tr:hover{background:#f9fafb}
             </thead>
             <tbody id="alertLogList"></tbody>
           </table>
+        </div>
+      </div>
+    </div>
+    <div id="tabFollowUpLedger" class="hidden">
+      <div class="panel-section">
+        <h3>📒 跟进台账</h3>
+        <div class="toolbar" style="margin-bottom:12px;padding:12px">
+          <div class="form-group" style="margin:0;min-width:160px">
+            <label>处置状态</label>
+            <select id="fLedgerDisp" onchange="saveLedgerFilterAndLoad()">
+              <option value="">全部</option>
+              <option value="unprocessed">未处理</option>
+              <option value="confirmed">已确认</option>
+              <option value="follow_up">需跟进</option>
+              <option value="ignored">已忽略</option>
+            </select>
+          </div>
+          <div class="form-group" style="margin:0;min-width:160px">
+            <label>到期状态</label>
+            <select id="fLedgerDue" onchange="saveLedgerFilterAndLoad()">
+              <option value="">全部</option>
+              <option value="overdue">已逾期</option>
+              <option value="due_today">今天到期</option>
+              <option value="not_due">未到期</option>
+            </select>
+          </div>
+          <div class="form-group" style="margin:0;min-width:200px">
+            <label>跟进负责人</label>
+            <select id="fLedgerAssignee" onchange="saveLedgerFilterAndLoad()">
+              <option value="">全部</option>
+            </select>
+          </div>
+          <div class="form-group" style="margin:0;min-width:160px">
+            <label>截止日期从</label>
+            <input id="fLedgerDeadlineFrom" type="date" onchange="saveLedgerFilterAndLoad()">
+          </div>
+          <div class="form-group" style="margin:0;min-width:160px">
+            <label>截止日期至</label>
+            <input id="fLedgerDeadlineTo" type="date" onchange="saveLedgerFilterAndLoad()">
+          </div>
+          <div class="form-group" style="margin:0;min-width:200px">
+            <label>关键词</label>
+            <input id="fLedgerKeyword" placeholder="单号/收银员/规则/备注" onkeypress="if(event.key==='Enter')saveLedgerFilterAndLoad()">
+          </div>
+          <div class="form-group" style="margin:0">
+            <button class="btn btn-gray btn-sm" onclick="saveLedgerFilterAndLoad()">查询</button>
+          </div>
+          <div class="form-group" style="margin:0">
+            <button class="btn btn-outline btn-sm" onclick="resetLedgerFilters()">重置</button>
+          </div>
+          <div class="spacer"></div>
+          <span id="ledgerBatchInfo" style="font-size:13px;color:#6b7280;margin-right:8px">未选择</span>
+          <button class="btn btn-sm btn-success" id="ledgerBatchConfirmBtn" onclick="openLedgerBatchDisposition('confirmed')" disabled>批量确认</button>
+          <button class="btn btn-sm btn-gray" id="ledgerBatchIgnoreBtn" onclick="openLedgerBatchDisposition('ignored')" disabled>批量忽略</button>
+          <button class="btn btn-sm btn-success btn-outline" onclick="exportLedgerCSV()">导出 CSV</button>
+        </div>
+        <div class="table-wrap">
+          <table class="log-table">
+            <thead>
+              <tr>
+                <th style="width:36px"><input type="checkbox" id="selectAllLedger" onchange="toggleSelectAllLedger(this)"></th>
+                <th>单据编号</th>
+                <th>收银员</th>
+                <th>规则名称</th>
+                <th>预警原因</th>
+                <th>处置状态</th>
+                <th>跟进备注</th>
+                <th>当前处理人</th>
+                <th>跟进截止</th>
+                <th>跟进负责人</th>
+                <th>到期状态</th>
+                <th>操作</th>
+              </tr>
+            </thead>
+            <tbody id="ledgerList"></tbody>
+          </table>
+          <div id="ledgerEmpty" class="empty hidden">暂无跟进记录</div>
         </div>
       </div>
     </div>
@@ -658,14 +736,17 @@ async function logout(){
 function switchTab(tab){
   document.getElementById('tabVouchers').classList.toggle('hidden', tab!=='vouchers');
   document.getElementById('tabAlertPanel').classList.toggle('hidden', tab!=='alertPanel');
+  const ledgerTab = document.getElementById('tabFollowUpLedger');
+  if(ledgerTab) ledgerTab.classList.toggle('hidden', tab!=='followUpLedger');
   const opTab = document.getElementById('tabOpLogs');
   if(opTab) opTab.classList.toggle('hidden', tab!=='opLogs');
   document.querySelectorAll('#mainTabs .tab').forEach((t,i)=>{
-    const tabs=['vouchers','alertPanel','opLogs'];
+    const tabs=['vouchers','alertPanel','followUpLedger','opLogs'];
     t.classList.toggle('active', tabs[i]===tab);
   });
   if(tab==='alertPanel') loadAlertPanel();
   if(tab==='opLogs') loadOpLogs();
+  if(tab==='followUpLedger') loadFollowUpLedger();
 }
 
 async function init() {
@@ -1265,6 +1346,11 @@ async function saveDisposition(){
   if(!document.getElementById('tabAlertPanel').classList.contains('hidden')){
     loadAlertPanel();
   }
+  const ledgerTab2 = document.getElementById('tabFollowUpLedger');
+  if(ledgerTab2 && !ledgerTab2.classList.contains('hidden')){
+    ledgerSelected.delete(tempDispositionAlertId);
+    loadFollowUpLedger();
+  }
   if(currentVoucher){
     openDetail(currentVoucher.id);
   }
@@ -1366,6 +1452,13 @@ async function saveBatchDisposition(){
   loadVouchers();
   if(!document.getElementById('tabAlertPanel').classList.contains('hidden')){
     loadAlertPanel();
+  }
+  const ledgerTab = document.getElementById('tabFollowUpLedger');
+  if(ledgerTab && !ledgerTab.classList.contains('hidden')){
+    results.success.forEach(s=>ledgerSelected.delete(s.id));
+    results.conflict.forEach(c=>ledgerSelected.delete(c.id));
+    results.not_found.forEach(n=>ledgerSelected.delete(n.id));
+    loadFollowUpLedger();
   }
   if(currentVoucher){
     openDetail(currentVoucher.id);
@@ -1639,6 +1732,199 @@ async function loadOpLogs(){
       <td style="max-width:300px;overflow:hidden;text-overflow:ellipsis" title="${l.detail||''}">${l.detail||''}</td>
     </tr>
   `).join('');
+}
+
+// ---------- Follow-up Ledger ---------- //
+
+let ledgerSelected = new Map();
+const LEDGER_FILTER_PREF = 'follow_up_ledger_filters';
+
+function getLedgerFilters(){
+  return {
+    disposition_status: document.getElementById('fLedgerDisp').value,
+    due_status: document.getElementById('fLedgerDue').value,
+    follow_up_assignee: document.getElementById('fLedgerAssignee').value,
+    deadline_from: document.getElementById('fLedgerDeadlineFrom').value,
+    deadline_to: document.getElementById('fLedgerDeadlineTo').value,
+    keyword: document.getElementById('fLedgerKeyword').value.trim()
+  };
+}
+
+function applyLedgerFilters(filters){
+  if(!filters) return;
+  if(filters.disposition_status !== undefined) document.getElementById('fLedgerDisp').value = filters.disposition_status || '';
+  if(filters.due_status !== undefined) document.getElementById('fLedgerDue').value = filters.due_status || '';
+  if(filters.follow_up_assignee !== undefined) document.getElementById('fLedgerAssignee').value = filters.follow_up_assignee || '';
+  if(filters.deadline_from !== undefined) document.getElementById('fLedgerDeadlineFrom').value = filters.deadline_from || '';
+  if(filters.deadline_to !== undefined) document.getElementById('fLedgerDeadlineTo').value = filters.deadline_to || '';
+  if(filters.keyword !== undefined) document.getElementById('fLedgerKeyword').value = filters.keyword || '';
+}
+
+async function saveLedgerFilterAndLoad(){
+  const filters = getLedgerFilters();
+  try{
+    await api(`/api/user-preferences/${LEDGER_FILTER_PREF}`, {method:'PUT', body:{value: filters}});
+  }catch(e){}
+  loadFollowUpLedger();
+}
+
+async function resetLedgerFilters(){
+  document.getElementById('fLedgerDisp').value = '';
+  document.getElementById('fLedgerDue').value = '';
+  document.getElementById('fLedgerAssignee').value = '';
+  document.getElementById('fLedgerDeadlineFrom').value = '';
+  document.getElementById('fLedgerDeadlineTo').value = '';
+  document.getElementById('fLedgerKeyword').value = '';
+  try{
+    await api(`/api/user-preferences/${LEDGER_FILTER_PREF}`, {method:'PUT', body:{value: {}}});
+  }catch(e){}
+  loadFollowUpLedger();
+}
+
+async function loadFollowUpLedger(){
+  // Try to load saved filters on first load
+  const dispEmpty = document.getElementById('fLedgerDisp').value === '';
+  const dueEmpty = document.getElementById('fLedgerDue').value === '';
+  const assigneeEmpty = document.getElementById('fLedgerAssignee').value === '';
+  const keywordEmpty = document.getElementById('fLedgerKeyword').value === '';
+  if(dispEmpty && dueEmpty && assigneeEmpty && keywordEmpty &&
+     !document.getElementById('fLedgerDeadlineFrom').value &&
+     !document.getElementById('fLedgerDeadlineTo').value){
+    try{
+      const pf = await api(`/api/user-preferences/${LEDGER_FILTER_PREF}`);
+      if(pf.ok && pf.data?.value){
+        applyLedgerFilters(pf.data.value);
+      }
+    }catch(e){}
+  }
+
+  const filters = getLedgerFilters();
+  const params = new URLSearchParams();
+  Object.entries(filters).forEach(([k,v])=>{ if(v) params.set(k,v); });
+  const url = '/api/follow-up-ledger' + (params.toString() ? '?' + params.toString() : '');
+  const r = await api(url);
+  if(!r.ok){ alert(r.error); return; }
+
+  // Populate assignee dropdown
+  const assigneeSel = document.getElementById('fLedgerAssignee');
+  const currentAssignee = assigneeSel.value;
+  assigneeSel.innerHTML = '<option value="">全部</option>';
+  (r.data.assignees || []).forEach(a=>{
+    assigneeSel.innerHTML += `<option value="${a}" ${a===currentAssignee?'selected':''}>${a}</option>`;
+  });
+  if(currentAssignee && !r.data.assignees?.includes(currentAssignee)){
+    assigneeSel.innerHTML += `<option value="${currentAssignee}" selected>${currentAssignee}</option>`;
+  }
+
+  const items = r.data.items || [];
+  renderLedger(items);
+}
+
+function renderLedger(items){
+  const el = document.getElementById('ledgerList');
+  const empty = document.getElementById('ledgerEmpty');
+  if(!items.length){
+    el.innerHTML = '';
+    empty.classList.remove('hidden');
+    updateLedgerBatchInfo();
+    return;
+  }
+  empty.classList.add('hidden');
+  el.innerHTML = items.map(it=>{
+    const checked = ledgerSelected.has(it.alert_id);
+    return `
+    <tr>
+      <td><input type="checkbox" class="ledger-checkbox" data-id="${it.alert_id}" data-version="${it.disposition_version}"
+        data-voucher="${it.voucher_no||''}" data-rule="${it.rule_name||''}"
+        onchange="toggleSelectLedger(${it.alert_id}, ${it.disposition_version}, '${(it.voucher_no||'').replace(/'/g,"\\'")}', '${(it.rule_name||'').replace(/'/g,"\\'")}', this)" ${checked?'checked':''}></td>
+      <td style="font-weight:600;color:#2563eb;cursor:pointer" onclick="switchTab('vouchers')">${it.voucher_no||'—'}</td>
+      <td>${it.cashier||'—'}</td>
+      <td>${it.rule_name||'—'}</td>
+      <td style="max-width:200px;overflow:hidden;text-overflow:ellipsis" title="${it.alert_reason||''}">${it.alert_reason||'—'}</td>
+      <td>${renderDispBadge(it.disposition_status)}</td>
+      <td style="max-width:200px;overflow:hidden;text-overflow:ellipsis" title="${it.disposition_note||''}">${it.disposition_note||'<span style="color:#d1d5db">—</span>'}</td>
+      <td>${it.disposition_handler||'—'}</td>
+      <td>${it.follow_up_deadline||'—'}</td>
+      <td>${it.follow_up_assignee||'—'}</td>
+      <td>${renderDueBadge(it.due_status)}</td>
+      <td><button class="btn btn-sm btn-outline" onclick="openDisposition(${it.alert_id},${it.disposition_version})">处置</button></td>
+    </tr>`;
+  }).join('');
+  updateLedgerBatchInfo();
+}
+
+function toggleSelectAllLedger(cb){
+  if(cb.checked){
+    document.querySelectorAll('.ledger-checkbox').forEach(c=>{
+      const id = parseInt(c.dataset.id);
+      const ver = parseInt(c.dataset.version);
+      if(!ledgerSelected.has(id)){
+        ledgerSelected.set(id, {id, version: ver, voucher_no: c.dataset.voucher||'', rule_name: c.dataset.rule||''});
+      }
+      c.checked = true;
+    });
+  } else {
+    ledgerSelected.clear();
+    document.querySelectorAll('.ledger-checkbox').forEach(c=>c.checked = false);
+  }
+  updateLedgerBatchInfo();
+}
+
+function toggleSelectLedger(id, version, voucher_no, rule_name, cb){
+  if(cb.checked){
+    ledgerSelected.set(id, {id, version, voucher_no, rule_name});
+  } else {
+    ledgerSelected.delete(id);
+  }
+  updateLedgerBatchInfo();
+}
+
+function updateLedgerBatchInfo(){
+  const info = document.getElementById('ledgerBatchInfo');
+  const btnC = document.getElementById('ledgerBatchConfirmBtn');
+  const btnI = document.getElementById('ledgerBatchIgnoreBtn');
+  const selAll = document.getElementById('selectAllLedger');
+  const count = ledgerSelected.size;
+  if(info) info.textContent = count === 0 ? '未选择' : `已选择 ${count} 条`;
+  if(btnC) btnC.disabled = count === 0;
+  if(btnI) btnI.disabled = count === 0;
+  if(selAll){
+    const cbs = document.querySelectorAll('.ledger-checkbox');
+    selAll.checked = cbs.length > 0 && count === cbs.length;
+    selAll.indeterminate = count > 0 && count < cbs.length;
+  }
+}
+
+function openLedgerBatchDisposition(targetStatus){
+  if(ledgerSelected.size === 0){
+    alert('请先选择要处置的预警记录');
+    return;
+  }
+  document.getElementById('batchDispositionAlert').classList.add('hidden');
+  document.getElementById('batchDispositionResults').classList.add('hidden');
+  document.getElementById('batchDispStatus').value = targetStatus;
+  document.getElementById('batchDispNote').value = '';
+  document.getElementById('batchFollowUpDeadline').value = '';
+  document.getElementById('batchFollowUpAssignee').value = '';
+  document.getElementById('batchFollowUpFields').classList.add('hidden');
+  toggleFollowUpFields('batchDispStatus','batchFollowUpFields');
+  document.getElementById('batchDispSubmitBtn').style.display = '';
+  const items = Array.from(ledgerSelected.values());
+  const summaryHtml = `
+    <div class="alert-item"><strong>已选择 ${items.length} 条预警记录，批量设置为「${DISP_STATUS_TEXT[targetStatus]||targetStatus}」</strong></div>
+    ${items.slice(0,5).map(i=>`<div class="alert-item" style="font-size:12px;color:#6b7280">${i.voucher_no} - ${i.rule_name}</div>`).join('')}
+    ${items.length>5?`<div class="alert-item" style="font-size:12px;color:#9ca3af">...共 ${items.length} 条</div>`:''}
+  `;
+  document.getElementById('batchDispositionSummary').innerHTML = summaryHtml;
+  openModal('batchDispositionModal');
+}
+
+function exportLedgerCSV(){
+  const filters = getLedgerFilters();
+  const params = new URLSearchParams();
+  Object.entries(filters).forEach(([k,v])=>{ if(v) params.set(k,v); });
+  const url = '/api/follow-up-ledger/export.csv' + (params.toString() ? '?' + params.toString() : '');
+  location.href = url;
 }
 
 init();

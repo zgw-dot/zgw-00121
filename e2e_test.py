@@ -25,6 +25,7 @@ BASE_URL = "http://127.0.0.1:5000"
 
 OK = "[PASS]"
 FAIL = "[FAIL]"
+WARN = "[WARN]"
 
 def clean_db():
     if DB_PATH.exists():
@@ -154,7 +155,7 @@ class Session:
         if "?" in path:
             base, qs = path.split("?", 1)
             parts = uparse.parse_qsl(qs, keep_blank_values=True)
-            qs_encoded = uparse.urlencode([(uparse.quote(k), uparse.quote(v)) for k, v in parts])
+            qs_encoded = uparse.urlencode(parts)
             path = base + "?" + qs_encoded
         url = BASE_URL + path
         req = urllib.request.Request(url, method="GET")
@@ -2625,6 +2626,366 @@ def run():
                   doc_contains_csv,
                   f"csv_cols={csv_cols} doc_cols={doc_cols}"): passed += 1
         else: failed += 1
+
+        print("\n--- Test 69: Follow-up Ledger - Permission Control ---")
+        adm4 = Session()
+        adm4.post("/api/login", {"username": "admin", "password": "admin123"})
+        s, d = cash3.get("/api/follow-up-ledger")
+        if expect("Cashier cannot access follow-up ledger (403)",
+                  s == 403, f"status={s}"): passed += 1
+        else: failed += 1
+        s, d = man9.get("/api/follow-up-ledger")
+        if expect("Manager can access follow-up ledger (200)",
+                  s == 200 and "items" in d, f"status={s} keys={list(d.keys())}"): passed += 1
+        else: failed += 1
+        s, d = adm4.get("/api/follow-up-ledger")
+        if expect("Admin can access follow-up ledger (200)",
+                  s == 200 and "items" in d, f"status={s}"): passed += 1
+        else: failed += 1
+        s, d = cash3.get("/api/follow-up-ledger/export.csv")
+        if expect("Cashier cannot export ledger CSV (403)",
+                  s == 403, f"status={s}"): passed += 1
+        else: failed += 1
+
+        print("\n--- Test 70: Follow-up Ledger - Response Structure ---")
+        s, d = man9.get("/api/follow-up-ledger")
+        if expect("Ledger returns items list", isinstance(d.get("items"), list)): passed += 1
+        else: failed += 1
+        if expect("Ledger returns assignees list", isinstance(d.get("assignees"), list)): passed += 1
+        else: failed += 1
+        items = d.get("items", [])
+        if items:
+            first = items[0]
+            required_ledger_fields = ["alert_id", "voucher_no", "cashier", "rule_name",
+                                       "alert_reason", "disposition_status", "disposition_note",
+                                       "disposition_handler", "due_status"]
+            all_present = all(f in first for f in required_ledger_fields)
+            if expect("Ledger item has all required fields",
+                      all_present, f"first_keys={list(first.keys())}"): passed += 1
+            else: failed += 1
+            due_val = first.get("due_status")
+            if expect("due_status is computed correctly",
+                      due_val in ["overdue", "due_today", "not_due", None],
+                      f"due_status={due_val}"): passed += 1
+            else: failed += 1
+        else:
+            print(f"  {WARN} No ledger items to check fields")
+            failed += 2
+
+        print("\n--- Test 71: Follow-up Ledger - Filter by Disposition Status ---")
+        s, d = man9.get("/api/follow-up-ledger?disposition_status=follow_up")
+        fu_items = d.get("items", [])
+        all_fu = all(i["disposition_status"] == "follow_up" for i in fu_items) if fu_items else True
+        if expect("Filter by disposition_status=follow_up returns only follow_up items",
+                  all_fu, f"count={len(fu_items)} statuses={[i['disposition_status'] for i in fu_items[:3]]}"): passed += 1
+        else: failed += 1
+
+        print("\n--- Test 72: Follow-up Ledger - Filter by Due Status ---")
+        s, d = man9.get("/api/follow-up-ledger?due_status=not_due")
+        not_due_items = d.get("items", [])
+        all_ok = all(i.get("due_status") == "not_due" for i in not_due_items) if not_due_items else True
+        if expect("Filter by due_status=not_due returns only not_due items",
+                  all_ok, f"count={len(not_due_items)} duestatuses={[i.get('due_status') for i in not_due_items[:3]]}"): passed += 1
+        else: failed += 1
+        s, d = man9.get("/api/follow-up-ledger?due_status=overdue")
+        od_items = d.get("items", [])
+        all_od = all(i.get("due_status") == "overdue" for i in od_items) if od_items else True
+        if expect("Filter by due_status=overdue returns only overdue items",
+                  all_od, f"count={len(od_items)}"): passed += 1
+        else: failed += 1
+
+        print("\n--- Test 73: Follow-up Ledger - Filter by Assignee and Keyword ---")
+        s, d = man9.get("/api/follow-up-ledger")
+        all_items = d.get("items", [])
+        fu_with_assignee = [i for i in all_items if i.get("follow_up_assignee")]
+        if fu_with_assignee:
+            target_assignee = fu_with_assignee[0]["follow_up_assignee"]
+            s2, d2 = man9.get(f"/api/follow-up-ledger?follow_up_assignee={target_assignee}")
+            filtered = d2.get("items", [])
+            all_match = all(i.get("follow_up_assignee") == target_assignee for i in filtered)
+            if expect(f"Filter by assignee='{target_assignee}' works",
+                      all_match and len(filtered) >= 1,
+                      f"count={len(filtered)}"): passed += 1
+            else: failed += 1
+        else:
+            print(f"  {WARN} No items with assignee to test filter")
+            failed += 1
+        s_kw, d_kw = man9.get("/api/follow-up-ledger?keyword=T-BATCH")
+        kw_items = d_kw.get("items", [])
+        kw_has_match = any("T-BATCH" in (i.get("voucher_no") or "") for i in kw_items) if kw_items else False
+        if expect("Keyword filter 'T-BATCH' returns matching vouchers",
+                  kw_has_match or len(kw_items) == 0,
+                  f"count={len(kw_items)}"): passed += 1
+        else: failed += 1
+
+        print("\n--- Test 74: Follow-up Ledger - User Preferences (Filter Persistence) ---")
+        s, d = man9.put("/api/user-preferences/follow_up_ledger_filters",
+                        {"value": {"disposition_status": "follow_up", "keyword": "test"}})
+        if expect("PUT user preferences returns ok", s == 200 and d.get("ok") is True): passed += 1
+        else: failed += 1
+        s, d = man9.get("/api/user-preferences/follow_up_ledger_filters")
+        if expect("GET user preferences returns saved value",
+                  s == 200 and d.get("ok") is True and
+                  d.get("data", {}).get("value", {}).get("disposition_status") == "follow_up",
+                  f"data={d.get('data')}"): passed += 1
+        else: failed += 1
+        s, d = cash3.get("/api/user-preferences/follow_up_ledger_filters")
+        if expect("Cashier can still read own preferences (not ledger access)",
+                  s == 200): passed += 1
+        else: failed += 1
+        s, d = man9.put("/api/user-preferences/follow_up_ledger_filters", {"value": {}})
+        if expect("Reset preferences works", s == 200 and d.get("ok") is True): passed += 1
+        else: failed += 1
+
+        print("\n--- Test 75: Follow-up Ledger - Cross-Restart Persistence of Filters ---")
+        s_cv, d_cv = man9.post("/api/vouchers", {
+            "voucher_no": "T-CROSS-RESTART-FU",
+            "shift_code": "晚班",
+            "shift_date": today_str,
+            "cashier": "跨重启测试员",
+            "diff_amount": 120.0,
+            "reason": "系统差异",
+            "remark": "跨重启跟进持久化验证"
+        })
+        vid_cross = d_cv.get("id")
+        s, d = man9.get(f"/api/vouchers/{vid_cross}")
+        cross_alerts = d.get("alerts", [])
+        alert_id_cross = None
+        if cross_alerts:
+            cross_a = cross_alerts[0]
+            s_dc, d_dc = man9.post(f"/api/alert-logs/{cross_a['id']}/disposition", {
+                "disposition_status": "follow_up",
+                "disposition_note": "跨重启验证",
+                "disposition_version": cross_a["disposition_version"],
+                "follow_up_deadline": "2099-12-31",
+                "follow_up_assignee": "张三"
+            })
+            if s_dc == 200:
+                alert_id_cross = cross_a["id"]
+        s, d = man9.put("/api/user-preferences/follow_up_ledger_filters",
+                        {"value": {"disposition_status": "confirmed",
+                                   "follow_up_assignee": "张三",
+                                   "due_status": "not_due"}})
+        if expect("Save preferences before restart", s == 200): passed += 1
+        else: failed += 1
+        if expect("Follow-up alert for cross-restart created",
+                  alert_id_cross is not None, f"alert_id_cross={alert_id_cross}"): passed += 1
+        else: failed += 1
+        try:
+            server.terminate()
+            try: server.wait(timeout=3)
+            except: pass
+        except Exception:
+            try: server.kill()
+            except: pass
+        print("  Server stopped, restarting...")
+        server = start_server()
+        man9b = Session()
+        s, d = man9b.post("/api/login", {"username": "manager", "password": "manager123"})
+        if expect("Manager re-login after restart", s == 200): passed += 1
+        else: failed += 1
+        s, d = man9b.get("/api/user-preferences/follow_up_ledger_filters")
+        saved_val = d.get("data", {}).get("value", {}) if d.get("ok") else {}
+        if expect("Preferences persisted across restart",
+                  saved_val.get("disposition_status") == "confirmed" and
+                  saved_val.get("follow_up_assignee") == "张三" and
+                  saved_val.get("due_status") == "not_due",
+                  f"saved_val={saved_val}"): passed += 1
+        else: failed += 1
+        s, d = man9b.get("/api/follow-up-ledger?disposition_status=follow_up")
+        if expect("Ledger API still works after restart",
+                  s == 200 and isinstance(d.get("items"), list)): passed += 1
+        else: failed += 1
+        s_cv2, d_cv2 = man9b.get(f"/api/vouchers/{vid_cross}")
+        restart_cross_alerts = d_cv2.get("alerts", [])
+        cross_fu_found = False
+        for ca in restart_cross_alerts:
+            if ca.get("follow_up_assignee") == "张三" and ca.get("follow_up_deadline") == "2099-12-31":
+                cross_fu_found = True
+                break
+        if expect("Single disposition follow-up fields persisted across restart",
+                  s_cv2 == 200 and cross_fu_found,
+                  f"alerts={[(a.get('follow_up_assignee'), a.get('follow_up_deadline')) for a in restart_cross_alerts[:3]]}"): passed += 1
+        else: failed += 1
+        man9 = man9b
+
+        print("\n--- Test 76: Follow-up Ledger - Batch Confirm/Ignore from Ledger ---")
+        s, d = man9.get("/api/follow-up-ledger?disposition_status=follow_up")
+        fu_items = d.get("items", [])
+        if len(fu_items) >= 2:
+            batch_items = [{"id": it["alert_id"], "disposition_version": it["disposition_version"]}
+                           for it in fu_items[:2]]
+            s_confirm, d_confirm = man9.post("/api/alert-logs/batch-disposition", {
+                "disposition_status": "confirmed",
+                "disposition_note": "跟进台账批量确认",
+                "items": batch_items
+            })
+            if expect("Batch confirm from ledger returns ok",
+                      s_confirm == 200 and d_confirm.get("ok") is True,
+                      f"status={s_confirm} error={d_confirm.get('error')}"): passed += 1
+            else: failed += 1
+            summary = d_confirm.get("summary", {})
+            if expect("Batch confirm summary has correct fields",
+                      (summary.get("success", 0) + summary.get("conflict", 0) + summary.get("not_found", 0)) == 2
+                      and summary.get("success") >= 1,
+                      f"summary={summary}"): passed += 1
+            else: failed += 1
+            results = d_confirm.get("results", {})
+            for succ in results.get("success", []):
+                if expect("Batch confirmed item has disposition_version incremented",
+                          succ.get("alert", {}).get("disposition_version", 0) > 0):
+                    passed += 1
+                else:
+                    failed += 1
+                break
+        else:
+            print(f"  {WARN} Not enough follow_up items for batch test, count={len(fu_items)}")
+            failed += 3
+
+        print("\n--- Test 77: Follow-up Ledger - Batch Conflict Detection ---")
+        s, d = man9.get("/api/follow-up-ledger")
+        conflict_targets = [i for i in d.get("items", []) if i.get("disposition_status") in ["follow_up", "unprocessed"]]
+        if conflict_targets:
+            target = conflict_targets[0]
+            stale_version = target["disposition_version"] + 999
+            s_conflict, d_conflict = man9.post("/api/alert-logs/batch-disposition", {
+                "disposition_status": "ignored",
+                "disposition_note": "冲突测试-批量忽略",
+                "items": [{"id": target["alert_id"], "disposition_version": stale_version}]
+            })
+            if expect("Batch disposition with stale version returns 200 with conflict result",
+                      s_conflict == 200 and d_conflict.get("ok") is True): passed += 1
+            else: failed += 1
+            conflict_sum = d_conflict.get("summary", {})
+            if expect("Batch summary reports 1 conflict",
+                      conflict_sum.get("conflict") == 1,
+                      f"summary={conflict_sum}"): passed += 1
+            else: failed += 1
+            conflict_results = d_conflict.get("results", {}).get("conflict", [])
+            if expect("Conflict details include current disposition info",
+                      len(conflict_results) == 1 and
+                      conflict_results[0].get("current", {}).get("disposition_status") is not None):
+                passed += 1
+            else: failed += 1
+        else:
+            print(f"  {WARN} No eligible items for conflict test")
+            failed += 3
+
+        print("\n--- Test 78: Follow-up Ledger - CSV Export ---")
+        url_led = BASE_URL + "/api/follow-up-ledger/export.csv"
+        req_led = urllib.request.Request(url_led)
+        ck_led = man9._cookie_header()
+        if ck_led: req_led.add_header("Cookie", ck_led)
+        with urllib.request.urlopen(req_led) as resp_led:
+            ledger_csv = resp_led.read().decode("utf-8")
+        ledger_cols = ledger_csv.splitlines()[0].split(",") if ledger_csv else []
+        ledger_cols_clean = [c.strip().lstrip("\ufeff") for c in ledger_cols]
+        expected_ledger_cols = ["单据编号", "收银员", "预警规则", "处置状态", "处置备注",
+                                "当前处理人", "跟进截止日期", "跟进负责人", "到期状态"]
+        all_ledger_cols = all(c in ledger_cols_clean for c in expected_ledger_cols)
+        if expect("Ledger CSV export contains all follow-up columns",
+                  all_ledger_cols, f"cols={ledger_cols_clean}"): passed += 1
+        else: failed += 1
+        if expect("Ledger CSV has UTF-8 BOM", ledger_csv.startswith("\ufeff")): passed += 1
+        else: failed += 1
+        url_filt = BASE_URL + "/api/follow-up-ledger/export.csv?disposition_status=confirmed"
+        req_filt = urllib.request.Request(url_filt)
+        if ck_led: req_filt.add_header("Cookie", ck_led)
+        with urllib.request.urlopen(req_filt) as resp_filt:
+            filtered_csv = resp_filt.read().decode("utf-8")
+        csv_lines = filtered_csv.splitlines()
+        if len(csv_lines) >= 2:
+            reader = csv.DictReader(io.StringIO(filtered_csv))
+            all_confirmed = True
+            for row in reader:
+                if "处置状态" in row and row["处置状态"] != "已确认":
+                    all_confirmed = False
+                    break
+            if expect("Filtered CSV export respects disposition_status=confirmed filter",
+                      all_confirmed): passed += 1
+            else: failed += 1
+        else:
+            print(f"  {WARN} No data rows in filtered CSV export")
+            failed += 1
+
+        print("\n--- Test 79: Follow-up Ledger - Batch Operation Log ---")
+        s, d = man9.get("/api/operation-logs")
+        logs = d.get("logs", [])
+        batch_logs = [l for l in logs if l.get("action") == "批量更新预警处置"]
+        if expect("Batch operations recorded in operation logs",
+                  len(batch_logs) >= 1): passed += 1
+        else: failed += 1
+        if batch_logs:
+            detail = batch_logs[0].get("detail", "") or ""
+            has_summary = ("成功" in detail or "冲突" in detail or "已确认" in detail or "已忽略" in detail
+                           or "截止日期" in detail or "负责人" in detail)
+            if expect("Batch operation log detail contains summary",
+                      has_summary, f"detail={detail[:100]}"): passed += 1
+            else: failed += 1
+            if expect("Batch operation log has operator and role",
+                      batch_logs[0].get("operator") and batch_logs[0].get("operator_role")):
+                passed += 1
+            else: failed += 1
+        else:
+            failed += 2
+
+        print("\n--- Test 80: Regression - Single/Batch Disposition Still Work After All Changes ---")
+        s_new, d_new = man9.post("/api/vouchers", {
+            "voucher_no": "T-REGRESSION-FINAL-001",
+            "shift_code": "早班",
+            "shift_date": today_str,
+            "cashier": "收银员A",
+            "diff_amount": 1500.0,
+            "reason": "系统差异",
+            "remark": "最终回归测试"
+        })
+        s_newd, d_newd = man9.post("/api/vouchers", {
+            "voucher_no": "T-REGRESSION-FINAL-002",
+            "shift_code": "早班",
+            "shift_date": today_str,
+            "cashier": "收银员B",
+            "diff_amount": -200.0,
+            "reason": "短款原因：收银差错",
+            "remark": "负金额回归"
+        })
+        if expect("Regression: New vouchers still created ok",
+                  s_new == 200 and d_new.get("id") and s_newd == 200 and d_newd.get("id"),
+                  f"s1={s_new} d1={d_new} s2={s_newd} d2={d_newd}"): passed += 1
+        else: failed += 1
+        if s_new == 200 and d_new.get("id"):
+            alerts_for_reg = d_new.get("alerts", [])
+            if alerts_for_reg:
+                reg_alert = alerts_for_reg[0]
+                s_disp, d_disp = man9.post(f"/api/alert-logs/{reg_alert['id']}/disposition", {
+                    "disposition_status": "confirmed",
+                    "disposition_note": "回归测试-单条确认",
+                    "disposition_version": reg_alert["disposition_version"]
+                })
+                if expect("Regression: Single disposition still works",
+                          s_disp == 200 and d_disp.get("ok") is True): passed += 1
+                else: failed += 1
+            else:
+                print(f"  {WARN} No alert triggered for regression voucher")
+                failed += 1
+        else:
+            failed += 1
+        if s_newd == 200 and d_newd.get("id"):
+            batchable = d_newd.get("alerts", [])
+            if len(batchable) >= 1:
+                b = batchable[0]
+                s_bd, d_bd = man9.post("/api/alert-logs/batch-disposition", {
+                    "disposition_status": "ignored",
+                    "disposition_note": "回归测试-批量忽略",
+                    "items": [{"id": b["id"], "disposition_version": b["disposition_version"]}]
+                })
+                if expect("Regression: Batch disposition still works",
+                          s_bd == 200 and d_bd.get("ok") is True): passed += 1
+                else: failed += 1
+            else:
+                print(f"  {WARN} No unprocessed alerts for batch regression")
+                failed += 1
+        else:
+            failed += 1
 
         print("\n" + "=" * 70)
         total = passed + failed

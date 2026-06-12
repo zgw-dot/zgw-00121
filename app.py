@@ -1,6 +1,7 @@
 import os
 import csv
 import io
+import json
 import secrets
 import sqlite3
 from datetime import datetime, date as date_type
@@ -202,6 +203,8 @@ def init_db():
     CREATE INDEX IF NOT EXISTS idx_alert_logs_voucher ON alert_logs(voucher_no);
     CREATE INDEX IF NOT EXISTS idx_alert_logs_rule ON alert_logs(rule_id);
     CREATE INDEX IF NOT EXISTS idx_alert_logs_disp ON alert_logs(disposition_status);
+    CREATE INDEX IF NOT EXISTS idx_alert_logs_assignee ON alert_logs(follow_up_assignee);
+    CREATE INDEX IF NOT EXISTS idx_alert_logs_deadline ON alert_logs(follow_up_deadline);
 
     CREATE TABLE IF NOT EXISTS operation_log (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -212,6 +215,14 @@ def init_db():
         created_at TEXT DEFAULT (datetime('now','localtime'))
     );
     CREATE INDEX IF NOT EXISTS idx_oplog_action ON operation_log(action);
+
+    CREATE TABLE IF NOT EXISTS user_preferences (
+        username TEXT NOT NULL,
+        pref_key TEXT NOT NULL,
+        pref_value TEXT,
+        updated_at TEXT DEFAULT (datetime('now','localtime')),
+        PRIMARY KEY (username, pref_key)
+    );
     """)
 
     cur.execute("PRAGMA table_info(alert_logs)")
@@ -1087,10 +1098,25 @@ def check_alert_rules(db, voucher_no, voucher_id, cashier, diff_amount, shift_da
         hit, reason = _check_single_rule_hit(db, rule, voucher_no, voucher_id, cashier, diff_amount, shift_date)
         if hit:
             existing = db.execute("""
-                SELECT id FROM alert_logs WHERE voucher_no = ? AND rule_id = ?
+                SELECT id, disposition_status, disposition_version, disposition_note,
+                       disposition_handler, disposition_time,
+                       follow_up_deadline, follow_up_assignee
+                FROM alert_logs WHERE voucher_no = ? AND rule_id = ?
             """, (voucher_no, rule["id"])).fetchone()
             if existing:
-                triggered.append({"rule_name": rule["name"], "rule_type": rule["rule_type"], "reason": reason})
+                triggered.append({
+                    "id": existing["id"],
+                    "rule_name": rule["name"],
+                    "rule_type": rule["rule_type"],
+                    "reason": reason,
+                    "disposition_status": existing["disposition_status"],
+                    "disposition_version": existing["disposition_version"],
+                    "disposition_note": existing["disposition_note"],
+                    "disposition_handler": existing["disposition_handler"],
+                    "disposition_time": existing["disposition_time"],
+                    "follow_up_deadline": existing["follow_up_deadline"],
+                    "follow_up_assignee": existing["follow_up_assignee"],
+                })
                 continue
             if cur is None:
                 c = db.cursor()
@@ -1100,7 +1126,20 @@ def check_alert_rules(db, voucher_no, voucher_id, cashier, diff_amount, shift_da
                 INSERT INTO alert_logs (voucher_no, voucher_id, rule_id, rule_name, rule_type, alert_reason)
                 VALUES (?, ?, ?, ?, ?, ?)
             """, (voucher_no, voucher_id, rule["id"], rule["name"], rule["rule_type"], reason))
-            triggered.append({"rule_name": rule["name"], "rule_type": rule["rule_type"], "reason": reason})
+            alert_id = c.lastrowid
+            triggered.append({
+                "id": alert_id,
+                "rule_name": rule["name"],
+                "rule_type": rule["rule_type"],
+                "reason": reason,
+                "disposition_status": "unprocessed",
+                "disposition_version": 0,
+                "disposition_note": None,
+                "disposition_handler": None,
+                "disposition_time": None,
+                "follow_up_deadline": None,
+                "follow_up_assignee": None,
+            })
 
     return triggered
 
@@ -1544,6 +1583,9 @@ def api_list_alert_logs():
     voucher_no = request.args.get("voucher_no") or ""
     disp_status = request.args.get("disposition_status") or ""
     due_status_filter = request.args.get("due_status") or ""
+    assignee = request.args.get("follow_up_assignee") or ""
+    deadline_from = request.args.get("deadline_from") or ""
+    deadline_to = request.args.get("deadline_to") or ""
     db = get_db()
     sql = "SELECT * FROM alert_logs WHERE 1=1"
     params = []
@@ -1553,7 +1595,16 @@ def api_list_alert_logs():
     if disp_status:
         sql += " AND disposition_status = ?"
         params.append(disp_status)
-    sql += " ORDER BY id DESC LIMIT 200"
+    if assignee:
+        sql += " AND follow_up_assignee = ?"
+        params.append(assignee)
+    if deadline_from:
+        sql += " AND follow_up_deadline >= ?"
+        params.append(deadline_from)
+    if deadline_to:
+        sql += " AND follow_up_deadline <= ?"
+        params.append(deadline_to)
+    sql += " ORDER BY id DESC LIMIT 500"
     rows = db.execute(sql, params).fetchall()
     logs = []
     is_cashier = current_user()["role"] == ROLE_CASHIER
@@ -1784,6 +1835,189 @@ def api_list_operation_logs():
             "SELECT * FROM operation_log ORDER BY id DESC LIMIT 200"
         ).fetchall()
     return jsonify({"logs": [row_to_dict(r) for r in rows]})
+
+
+# ---------- User Preferences ---------- #
+
+@app.route("/api/user-preferences/<path:pref_key>", methods=["GET"])
+@login_required
+def api_get_user_preference(pref_key):
+    user = current_user()
+    db = get_db()
+    row = db.execute(
+        "SELECT pref_value FROM user_preferences WHERE username = ? AND pref_key = ?",
+        (user["username"], pref_key)
+    ).fetchone()
+    value = None
+    if row and row["pref_value"]:
+        try:
+            value = json.loads(row["pref_value"])
+        except Exception:
+            value = row["pref_value"]
+    return jsonify({"ok": True, "data": {"value": value}})
+
+
+@app.route("/api/user-preferences/<path:pref_key>", methods=["PUT"])
+@login_required
+def api_set_user_preference(pref_key):
+    data = request.get_json(force=True, silent=True) or {}
+    user = current_user()
+    value = data.get("value")
+    if isinstance(value, (dict, list)):
+        value_str = json.dumps(value, ensure_ascii=False)
+    else:
+        value_str = str(value) if value is not None else None
+    db = get_db()
+    cur = db.cursor()
+    cur.execute("""
+        INSERT INTO user_preferences (username, pref_key, pref_value, updated_at)
+        VALUES (?, ?, ?, datetime('now','localtime'))
+        ON CONFLICT(username, pref_key) DO UPDATE SET
+            pref_value = excluded.pref_value,
+            updated_at = datetime('now','localtime')
+    """, (user["username"], pref_key, value_str))
+    db.commit()
+    return jsonify({"ok": True})
+
+
+# ---------- Follow-up Ledger ---------- #
+
+def _build_followup_query(params_from_request, user_role):
+    disp_status = params_from_request.get("disposition_status") or ""
+    due_status = params_from_request.get("due_status") or ""
+    assignee = params_from_request.get("follow_up_assignee") or ""
+    deadline_from = params_from_request.get("deadline_from") or ""
+    deadline_to = params_from_request.get("deadline_to") or ""
+    keyword = (params_from_request.get("keyword") or "").strip()
+
+    sql = """
+        SELECT al.id AS alert_id, al.voucher_no, al.rule_name, al.alert_reason,
+               al.disposition_status, al.disposition_note, al.disposition_handler,
+               al.disposition_time, al.disposition_version,
+               al.follow_up_deadline, al.follow_up_assignee, al.created_at AS alert_time,
+               v.cashier, v.shift_code, v.shift_date, v.diff_amount, v.status AS voucher_status
+        FROM alert_logs al
+        LEFT JOIN vouchers v ON al.voucher_no = v.voucher_no
+        WHERE 1=1
+    """
+    params = []
+    if disp_status:
+        sql += " AND al.disposition_status = ?"
+        params.append(disp_status)
+    if assignee:
+        sql += " AND al.follow_up_assignee = ?"
+        params.append(assignee)
+    if deadline_from:
+        sql += " AND al.follow_up_deadline >= ?"
+        params.append(deadline_from)
+    if deadline_to:
+        sql += " AND al.follow_up_deadline <= ?"
+        params.append(deadline_to)
+    if keyword:
+        sql += " AND (al.voucher_no LIKE ? OR v.cashier LIKE ? OR al.rule_name LIKE ? OR al.disposition_note LIKE ?)"
+        k = f"%{keyword}%"
+        params += [k, k, k, k]
+    return sql, params, due_status
+
+
+@app.route("/api/follow-up-ledger", methods=["GET"])
+@role_required(ROLE_ADMIN, ROLE_MANAGER)
+def api_follow_up_ledger():
+    db = get_db()
+    sql, params, due_status = _build_followup_query(request.args, current_user()["role"])
+    sql += " ORDER BY al.id DESC LIMIT 500"
+    rows = db.execute(sql, params).fetchall()
+    items = []
+    for r in rows:
+        d = {
+            "alert_id": r["alert_id"],
+            "voucher_no": r["voucher_no"],
+            "cashier": r["cashier"],
+            "rule_name": r["rule_name"],
+            "alert_reason": r["alert_reason"],
+            "disposition_status": r["disposition_status"],
+            "disposition_note": r["disposition_note"],
+            "disposition_handler": r["disposition_handler"],
+            "disposition_time": r["disposition_time"],
+            "disposition_version": r["disposition_version"],
+            "follow_up_deadline": r["follow_up_deadline"],
+            "follow_up_assignee": r["follow_up_assignee"],
+            "due_status": compute_due_status(r["follow_up_deadline"]),
+            "shift_code": r["shift_code"],
+            "shift_date": r["shift_date"],
+            "diff_amount": r["diff_amount"],
+            "voucher_status": r["voucher_status"],
+            "alert_time": r["alert_time"],
+        }
+        if due_status and d["due_status"] != due_status:
+            continue
+        items.append(d)
+
+    assignee_rows = db.execute("""
+        SELECT DISTINCT follow_up_assignee FROM alert_logs
+        WHERE follow_up_assignee IS NOT NULL AND follow_up_assignee != ''
+        ORDER BY follow_up_assignee
+    """).fetchall()
+    assignees = [r["follow_up_assignee"] for r in assignee_rows]
+
+    return jsonify({
+        "ok": True,
+        "items": items,
+        "assignees": assignees
+    })
+
+
+@app.route("/api/follow-up-ledger/export.csv")
+@role_required(ROLE_ADMIN, ROLE_MANAGER)
+def api_follow_up_ledger_export():
+    db = get_db()
+    sql, params, due_status = _build_followup_query(request.args, current_user()["role"])
+    sql += " ORDER BY al.id DESC"
+    rows = db.execute(sql, params).fetchall()
+
+    buf = io.StringIO()
+    buf.write("\ufeff")
+    writer = csv.writer(buf)
+    writer.writerow([
+        "单据编号", "收银员", "班次", "班次日期", "差异金额", "单据状态",
+        "预警规则", "预警原因", "处置状态", "处置备注", "当前处理人",
+        "处理时间", "跟进截止日期", "跟进负责人", "到期状态", "预警时间"
+    ])
+
+    status_text = {
+        STATUS_DRAFT: "草稿", STATUS_PENDING: "待复核", STATUS_REVIEWED: "复核通过",
+        STATUS_RETURNED: "已退回", STATUS_CLOSED: "已关闭", STATUS_REVOKED: "已撤销"
+    }
+
+    for r in rows:
+        due_s = compute_due_status(r["follow_up_deadline"])
+        if due_status and due_s != due_status:
+            continue
+        writer.writerow([
+            r["voucher_no"] or "",
+            r["cashier"] or "",
+            r["shift_code"] or "",
+            r["shift_date"] or "",
+            f"{r['diff_amount']:.2f}" if r["diff_amount"] is not None else "",
+            status_text.get(r["voucher_status"], r["voucher_status"] or ""),
+            r["rule_name"] or "",
+            r["alert_reason"] or "",
+            DISP_STATUS_LABELS.get(r["disposition_status"], r["disposition_status"] or ""),
+            r["disposition_note"] or "",
+            r["disposition_handler"] or "",
+            r["disposition_time"] or "",
+            r["follow_up_deadline"] or "",
+            r["follow_up_assignee"] or "",
+            DUE_STATUS_LABELS.get(due_s, "") if due_s else "",
+            r["alert_time"] or "",
+        ])
+
+    output = buf.getvalue().encode("utf-8")
+    resp = make_response(output)
+    resp.headers["Content-Type"] = "text/csv; charset=utf-8"
+    fn = f"follow_up_ledger_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+    resp.headers["Content-Disposition"] = f'attachment; filename="{fn}"'
+    return resp
 
 
 # ---------- Init & Run ---------- #
