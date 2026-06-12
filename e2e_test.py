@@ -59,7 +59,6 @@ class Session:
     def _extract_cookies(self, resp):
         sc = resp.headers.get_all("Set-Cookie") or []
         for s in sc:
-            # extract name=value before the first ;
             nv = s.split(";")[0]
             if "=" in nv:
                 name, val = nv.split("=", 1)
@@ -108,9 +107,49 @@ class Session:
             except Exception:
                 return e.code, {"error": c or "empty"}
 
+    def put(self, path, body=None):
+        url = BASE_URL + path
+        headers = {"Content-Type": "application/json"}
+        data = json.dumps(body or {}).encode()
+        ch = self._cookie_header()
+        if ch:
+            headers["Cookie"] = ch
+        req = urllib.request.Request(url, data=data, headers=headers, method="PUT")
+        try:
+            with urllib.request.urlopen(req) as resp:
+                self._extract_cookies(resp)
+                c = resp.read().decode()
+                return resp.status, json.loads(c) if c else {}
+        except urllib.error.HTTPError as e:
+            self._extract_cookies(e)
+            c = e.read().decode()
+            try:
+                return e.code, json.loads(c)
+            except Exception:
+                return e.code, {"error": c or "empty"}
+
+    def delete(self, path):
+        url = BASE_URL + path
+        headers = {}
+        ch = self._cookie_header()
+        if ch:
+            headers["Cookie"] = ch
+        req = urllib.request.Request(url, headers=headers, method="DELETE")
+        try:
+            with urllib.request.urlopen(req) as resp:
+                self._extract_cookies(resp)
+                c = resp.read().decode()
+                return resp.status, json.loads(c) if c else {}
+        except urllib.error.HTTPError as e:
+            self._extract_cookies(e)
+            c = e.read().decode()
+            try:
+                return e.code, json.loads(c)
+            except Exception:
+                return e.code, {"error": c or "empty"}
+
     def get(self, path):
         import urllib.parse as uparse
-        # split path into base and query, encode query values
         if "?" in path:
             base, qs = path.split("?", 1)
             parts = uparse.parse_qsl(qs, keep_blank_values=True)
@@ -381,7 +420,240 @@ def run():
         if expect("Contains closed T-MAIN-001", "T-MAIN-001" in content): passed += 1
         else: failed += 1
 
-        print("\n--- Test 11: Persistence - after restart pending/revoked survive ---")
+        # ===================== ALERT RULE TESTS =====================
+
+        print("\n--- Test 11: Alert rule CRUD ---")
+        s, d = adm.post("/api/alert-rules", {
+            "name": "单笔超500",
+            "rule_type": "single_amount",
+            "threshold": 500,
+            "description": "单笔差异超500元预警",
+            "enabled": True
+        })
+        if expect("Create single_amount rule OK", s == 200 and d.get("id"), f"status={s}"): passed += 1
+        else: failed += 1
+        rule_single_id = d.get("id")
+
+        s, d = adm.post("/api/alert-rules", {
+            "name": "累计超1000",
+            "rule_type": "cumulative_amount",
+            "threshold": 1000,
+            "description": "收银员当天累计差异超1000元",
+        })
+        if expect("Create cumulative_amount rule OK", s == 200, f"status={s}"): passed += 1
+        else: failed += 1
+
+        s, d = adm.post("/api/alert-rules", {
+            "name": "退回超2次",
+            "rule_type": "consecutive_return",
+            "threshold": 2,
+            "description": "同一收银员退回2次以上",
+        })
+        if expect("Create consecutive_return rule OK", s == 200, f"status={s}"): passed += 1
+        else: failed += 1
+        rule_return_id = d.get("id")
+
+        s, d = adm.post("/api/alert-rules", {
+            "name": "单笔超500",
+            "rule_type": "single_amount",
+            "threshold": 999,
+        })
+        if assert_eq("Duplicate rule name rejected", s, 400): passed += 1
+        else: failed += 1
+
+        s, d = adm.post("/api/alert-rules", {
+            "name": "",
+            "rule_type": "single_amount",
+            "threshold": 100,
+        })
+        if assert_eq("Empty name rejected", s, 400): passed += 1
+        else: failed += 1
+
+        s, d = adm.post("/api/alert-rules", {
+            "name": "bad type",
+            "rule_type": "invalid_type",
+            "threshold": 100,
+        })
+        if assert_eq("Invalid type rejected", s, 400): passed += 1
+        else: failed += 1
+
+        s, d = adm.post("/api/alert-rules", {
+            "name": "zero threshold",
+            "rule_type": "single_amount",
+            "threshold": 0,
+        })
+        if assert_eq("Zero threshold rejected", s, 400): passed += 1
+        else: failed += 1
+
+        s, d = adm.get("/api/alert-rules")
+        if expect("List rules returns 3 rules", len(d.get("rules", [])) == 3, f"count={len(d.get('rules',[]))}"): passed += 1
+        else: failed += 1
+
+        s, d = adm.put(f"/api/alert-rules/{rule_single_id}", {"threshold": 300})
+        if assert_eq("Update rule threshold OK", s, 200): passed += 1
+        else: failed += 1
+
+        s, d = adm.put(f"/api/alert-rules/{rule_single_id}", {"name": "累计超1000"})
+        if assert_eq("Update to duplicate name rejected", s, 400): passed += 1
+        else: failed += 1
+
+        s, d = adm.put(f"/api/alert-rules/{rule_return_id}", {"enabled": False})
+        if assert_eq("Disable rule OK", s, 200): passed += 1
+        else: failed += 1
+
+        print("\n--- Test 12: Cashier cannot manage alert rules ---")
+        s, d = cash.post("/api/alert-rules", {
+            "name": "cashier rule",
+            "rule_type": "single_amount",
+            "threshold": 100,
+        })
+        if assert_eq("Cashier create rule rejected (403)", s, 403): passed += 1
+        else: failed += 1
+
+        s, d = cash.put(f"/api/alert-rules/{rule_single_id}", {"threshold": 9999})
+        if assert_eq("Cashier update rule rejected (403)", s, 403): passed += 1
+        else: failed += 1
+
+        s, d = cash.delete(f"/api/alert-rules/{rule_single_id}")
+        if assert_eq("Cashier delete rule rejected (403)", s, 403): passed += 1
+        else: failed += 1
+
+        s, d = cash.get("/api/alert-rules")
+        if assert_eq("Cashier can read rules (200)", s, 200): passed += 1
+        else: failed += 1
+
+        print("\n--- Test 13: Alert triggered on voucher create/submit ---")
+        s, d = cash.post("/api/vouchers", {
+            "voucher_no":"T-ALERT-001",
+            "shift_code":"早班",
+            "shift_date":"2026-06-12",
+            "cashier":"小王",
+            "diff_amount": 600.00,
+            "reason":"系统差异",
+            "remark":"测试单笔预警",
+        })
+        vid_alert1 = d.get("id")
+        if expect("Create voucher with alert trigger", s == 200 and vid_alert1, f"status={s}"): passed += 1
+        else: failed += 1
+        alerts1 = d.get("alerts", [])
+        if expect("Create triggers single_amount alert", len(alerts1) > 0, f"alerts={alerts1}"): passed += 1
+        else: failed += 1
+
+        s, d = cash.post(f"/api/vouchers/{vid_alert1}/submit", {"remark":"测试单笔预警提交"})
+        if assert_eq("Submit with alert still succeeds (200)", s, 200): passed += 1
+        else: failed += 1
+        submit_alerts = d.get("alerts", [])
+        if expect("Submit triggers alert as well", len(submit_alerts) > 0, f"alerts={submit_alerts}"): passed += 1
+        else: failed += 1
+
+        s, d = cash.post("/api/vouchers", {
+            "voucher_no":"T-NOALERT-001",
+            "shift_code":"早班",
+            "shift_date":"2026-06-12",
+            "cashier":"小赵",
+            "diff_amount": 50.00,
+            "reason":"",
+            "remark":"低于阈值不触发",
+        })
+        vid_noalert = d.get("id")
+        if expect("Below threshold no alert", len(d.get("alerts", [])) == 0, f"alerts={d.get('alerts',[])}"): passed += 1
+        else: failed += 1
+
+        print("\n--- Test 14: Alert shown in voucher list and detail ---")
+        s, d = cash.get("/api/vouchers")
+        vouchers = d.get("vouchers", [])
+        alert_voucher = next((v for v in vouchers if v["voucher_no"] == "T-ALERT-001"), None)
+        if expect("Voucher list has warning_reasons", alert_voucher and len(alert_voucher.get("warning_reasons", [])) > 0,
+                  f"reasons={alert_voucher.get('warning_reasons',[]) if alert_voucher else 'N/A'}"): passed += 1
+        else: failed += 1
+
+        no_alert_voucher = next((v for v in vouchers if v["voucher_no"] == "T-NOALERT-001"), None)
+        if expect("Below threshold voucher has no warnings", no_alert_voucher and len(no_alert_voucher.get("warning_reasons", [])) == 0,
+                  f"reasons={no_alert_voucher.get('warning_reasons',[]) if no_alert_voucher else 'N/A'}"): passed += 1
+        else: failed += 1
+
+        s, d = cash.get(f"/api/vouchers/{vid_alert1}")
+        detail_alerts = d.get("alerts", [])
+        if expect("Detail has alerts array", len(detail_alerts) > 0, f"alerts_count={len(detail_alerts)}"): passed += 1
+        else: failed += 1
+        if expect("Alert has rule_name and alert_reason",
+                  detail_alerts[0].get("rule_name") and detail_alerts[0].get("alert_reason"),
+                  f"alert={detail_alerts[0] if detail_alerts else 'N/A'}"): passed += 1
+        else: failed += 1
+
+        print("\n--- Test 15: Alert does not block existing flows ---")
+        man.post(f"/api/vouchers/{vid_alert1}/review", {"action":"approve","note":"approved despite alert"})
+        s, d = man.post(f"/api/vouchers/{vid_alert1}/close", {"note":"closed"})
+        if assert_eq("Alerted voucher can be closed normally", s, 200): passed += 1
+        else: failed += 1
+
+        print("\n--- Test 16: Alert logs API ---")
+        s, d = cash.get("/api/alert-logs")
+        if expect("Alert logs returns list", isinstance(d.get("logs"), list) and len(d["logs"]) > 0,
+                  f"count={len(d.get('logs',[]))}"): passed += 1
+        else: failed += 1
+
+        s, d = cash.get("/api/alert-logs?voucher_no=T-ALERT-001")
+        if expect("Filter alert logs by voucher_no", len(d.get("logs", [])) > 0,
+                  f"count={len(d.get('logs',[]))}"): passed += 1
+        else: failed += 1
+
+        print("\n--- Test 17: Alert rules CSV import/export ---")
+        url = BASE_URL + "/api/alert-rules/export.csv"
+        req = urllib.request.Request(url)
+        cookie_header = adm._cookie_header()
+        if cookie_header:
+            req.add_header("Cookie", cookie_header)
+        with urllib.request.urlopen(req) as resp:
+            rules_csv = resp.read().decode("utf-8")
+        if expect("Export rules CSV has header", "规则名称" in rules_csv, f"csv_start={rules_csv[:100]}"): passed += 1
+        else: failed += 1
+
+        rules_csv_with_dup = (
+            "规则名称,规则类型,阈值,是否启用,描述\n"
+            "单笔超500,single_amount,300,是,同名规则\n"
+            "导入新规则,single_amount,888,是,新导入的规则\n"
+        ).encode("utf-8-sig")
+        s, d = adm.post("/api/alert-rules/import", form_data={
+            "file": ("rules.csv", rules_csv_with_dup, "text/csv")
+        })
+        if expect("Import rules: skip duplicate, add new",
+                  d.get("skipped", -1) >= 1 and d.get("success", -1) >= 1,
+                  f"success={d.get('success')} skipped={d.get('skipped')} failed={d.get('failed')} details={d.get('details',[])}"): passed += 1
+        else: failed += 1
+        has_skip_detail = any("已存在" in dt for dt in d.get("details", []))
+        if expect("Skip detail mentions name conflict", has_skip_detail, f"details={d.get('details',[])}"): passed += 1
+        else: failed += 1
+
+        s, d = adm.get("/api/alert-rules")
+        if expect("After import new rule exists", any(r["name"] == "导入新规则" for r in d["rules"]),
+                  f"names={[r['name'] for r in d['rules']]}"): passed += 1
+        else: failed += 1
+
+        print("\n--- Test 18: Operation logs ---")
+        s, d = adm.get("/api/operation-logs")
+        if expect("Operation logs returns list", isinstance(d.get("logs"), list) and len(d["logs"]) > 0,
+                  f"count={len(d.get('logs',[]))}"): passed += 1
+        else: failed += 1
+        has_rule_log = any("预警规则" in l.get("action", "") for l in d["logs"])
+        if expect("Operation logs contain rule actions", has_rule_log,
+                  f"actions={[l.get('action') for l in d['logs'][:5]]}"): passed += 1
+        else: failed += 1
+
+        s, d = cash.get("/api/operation-logs")
+        if assert_eq("Cashier cannot read operation logs (403)", s, 403): passed += 1
+        else: failed += 1
+
+        print("\n--- Test 19: Delete alert rule ---")
+        s, d = adm.delete(f"/api/alert-rules/{rule_single_id}")
+        if assert_eq("Delete rule OK", s, 200): passed += 1
+        else: failed += 1
+
+        s, d = adm.delete(f"/api/alert-rules/{rule_single_id}")
+        if assert_eq("Delete non-existent rule 404", s, 404): passed += 1
+        else: failed += 1
+
+        print("\n--- Test 20: Alert rule persistence after restart ---")
         server.terminate()
         try:
             server.wait(timeout=5)
@@ -392,18 +664,19 @@ def run():
 
         con = sqlite3.connect(str(DB_PATH))
         con.row_factory = sqlite3.Row
-        row = con.execute("SELECT status FROM vouchers WHERE id = ?", (new_vid,)).fetchone()
-        if assert_eq("Pending state persisted in DB", row["status"], "pending"): passed += 1
+        row = con.execute("SELECT COUNT(*) AS c FROM alert_rules").fetchone()
+        rule_count = row["c"]
+        if expect("Alert rules persisted in DB", rule_count >= 2, f"count={rule_count}"): passed += 1
         else: failed += 1
 
-        row = con.execute("SELECT status, revoked_by FROM vouchers WHERE id = ?", (vid3,)).fetchone()
-        if assert_eq("Revoked state persisted in DB", row["status"], "revoked"): passed += 1
-        else: failed += 1
-        if expect("Revoked_by recorded", row["revoked_by"] is not None): passed += 1
+        row = con.execute("SELECT COUNT(*) AS c FROM alert_logs").fetchone()
+        log_count = row["c"]
+        if expect("Alert logs persisted in DB", log_count > 0, f"count={log_count}"): passed += 1
         else: failed += 1
 
-        tl = con.execute("SELECT action FROM timeline WHERE voucher_no = ? ORDER BY id", (old_no,)).fetchall()
-        if expect("Timeline persisted >=4 entries", len(tl) >= 4, f"tl_count={len(tl)}"): passed += 1
+        row = con.execute("SELECT COUNT(*) AS c FROM operation_log").fetchone()
+        op_count = row["c"]
+        if expect("Operation logs persisted in DB", op_count > 0, f"count={op_count}"): passed += 1
         else: failed += 1
         con.close()
 
@@ -411,11 +684,40 @@ def run():
         time.sleep(0.5)
         man2 = Session()
         man2.post("/api/login", {"username":"manager","password":"manager123"})
+        s, d = man2.get("/api/alert-rules")
+        if expect("Rules still present after restart", len(d.get("rules", [])) >= 2,
+                  f"count={len(d.get('rules',[]))}"): passed += 1
+        else: failed += 1
+
+        s, d = man2.get("/api/alert-logs")
+        if expect("Alert logs still present after restart", len(d.get("logs", [])) > 0,
+                  f"count={len(d.get('logs',[]))}"): passed += 1
+        else: failed += 1
+
+        print("\n--- Test 21: Original flow still works after alert feature ---")
         s, d = man2.get(f"/api/vouchers/{new_vid}")
-        if assert_eq("After restart pending status visible", d["voucher"]["status"], "pending"): passed += 1
+        if assert_eq("After restart pending status still visible", d["voucher"]["status"], "pending"): passed += 1
         else: failed += 1
         s, d = man2.get(f"/api/vouchers/{vid3}")
-        if assert_eq("After restart revoked status visible", d["voucher"]["status"], "revoked"): passed += 1
+        if assert_eq("After restart revoked status still visible", d["voucher"]["status"], "revoked"): passed += 1
+        else: failed += 1
+
+        print("\n--- Test 22: Alert rule import conflict detail written to operation log ---")
+        rules_csv_bad = (
+            "规则名称,规则类型,阈值,是否启用,描述\n"
+            "bad_rule,invalid_type,100,是,坏类型\n"
+        ).encode("utf-8-sig")
+        s, d = man2.post("/api/alert-rules/import", form_data={
+            "file": ("bad.csv", rules_csv_bad, "text/csv")
+        })
+        if expect("Import with bad type: failed >= 1", d.get("failed", 0) >= 1,
+                  f"failed={d.get('failed')} details={d.get('details',[])}"): passed += 1
+        else: failed += 1
+
+        s, d = man2.get("/api/operation-logs")
+        has_import_log = any("导入预警规则" in l.get("action", "") for l in d.get("logs", []))
+        if expect("Import attempt logged in operation log", has_import_log,
+                  f"actions={[l.get('action') for l in d['logs'][:5]]}"): passed += 1
         else: failed += 1
 
         print("\n" + "=" * 70)

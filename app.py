@@ -58,6 +58,13 @@ def close_db(exc):
         db.close()
 
 
+def add_operation_log(cur, action, operator, operator_role, detail=None):
+    cur.execute("""
+        INSERT INTO operation_log (action, operator, operator_role, detail)
+        VALUES (?, ?, ?, ?)
+    """, (action, operator, operator_role, detail))
+
+
 def init_db():
     con = sqlite3.connect(str(DB_PATH))
     cur = con.cursor()
@@ -124,6 +131,41 @@ def init_db():
         imported_by TEXT,
         created_at TEXT DEFAULT (datetime('now','localtime'))
     );
+
+    CREATE TABLE IF NOT EXISTS alert_rules (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT UNIQUE NOT NULL,
+        rule_type TEXT NOT NULL,
+        threshold REAL NOT NULL,
+        enabled INTEGER NOT NULL DEFAULT 1,
+        description TEXT,
+        created_by TEXT,
+        created_at TEXT DEFAULT (datetime('now','localtime')),
+        updated_at TEXT DEFAULT (datetime('now','localtime'))
+    );
+
+    CREATE TABLE IF NOT EXISTS alert_logs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        voucher_no TEXT NOT NULL,
+        voucher_id INTEGER,
+        rule_id INTEGER,
+        rule_name TEXT NOT NULL,
+        rule_type TEXT NOT NULL,
+        alert_reason TEXT NOT NULL,
+        created_at TEXT DEFAULT (datetime('now','localtime'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_alert_logs_voucher ON alert_logs(voucher_no);
+    CREATE INDEX IF NOT EXISTS idx_alert_logs_rule ON alert_logs(rule_id);
+
+    CREATE TABLE IF NOT EXISTS operation_log (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        action TEXT NOT NULL,
+        operator TEXT NOT NULL,
+        operator_role TEXT,
+        detail TEXT,
+        created_at TEXT DEFAULT (datetime('now','localtime'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_oplog_action ON operation_log(action);
     """)
 
     for u in DEFAULT_USERS:
@@ -350,6 +392,24 @@ def api_list_vouchers():
     rows = db.execute(sql, params).fetchall()
     result = [row_to_dict(r) for r in rows]
 
+    alert_map = {}
+    if result:
+        vnos = [v["voucher_no"] for v in result]
+        placeholders = ",".join("?" * len(vnos))
+        alert_rows = db.execute(f"""
+            SELECT voucher_no, rule_name, rule_type, alert_reason
+            FROM alert_logs WHERE voucher_no IN ({placeholders})
+        """, vnos).fetchall()
+        for ar in alert_rows:
+            alert_map.setdefault(ar["voucher_no"], []).append({
+                "rule_name": ar["rule_name"],
+                "rule_type": ar["rule_type"],
+                "reason": ar["alert_reason"]
+            })
+
+    for v in result:
+        v["warning_reasons"] = alert_map.get(v["voucher_no"], [])
+
     handler_rows = db.execute("""
         SELECT DISTINCT username, display_name FROM users
         WHERE role IN ('manager','admin','cashier')
@@ -402,9 +462,11 @@ def api_get_voucher(vid):
         "SELECT * FROM timeline WHERE voucher_no = ? ORDER BY id ASC",
         (v["voucher_no"],)
     ).fetchall()
+    alerts = get_voucher_alerts(db, v["voucher_no"])
     return jsonify({
         "voucher": row_to_dict(v),
-        "timeline": [row_to_dict(t) for t in tl]
+        "timeline": [row_to_dict(t) for t in tl],
+        "alerts": alerts
     })
 
 
@@ -439,9 +501,11 @@ def api_create_voucher():
     vid = cur.lastrowid
     add_timeline(cur, voucher_no, "创建草稿", user["username"], user["role"],
                  f"创建草稿：{voucher_no}")
+    alerts = check_alert_rules(db, voucher_no, vid, payload["cashier"],
+                               payload["diff_amount"], payload["shift_date"], cur)
     db.commit()
 
-    return jsonify({"id": vid, "voucher_no": voucher_no})
+    return jsonify({"id": vid, "voucher_no": voucher_no, "alerts": alerts})
 
 
 @app.route("/api/vouchers/<int:vid>/submit", methods=["POST"])
@@ -499,8 +563,12 @@ def api_submit_voucher(vid):
     ))
     add_timeline(cur, v["voucher_no"], "提交复核", user["username"], user["role"],
                  f"收银员提交复核，金额：{amount}，备注：{remark or v['remark'] or '无'}")
+    final_cashier = data.get("cashier") or v["cashier"]
+    final_date = data.get("shift_date") or v["shift_date"]
+    alerts = check_alert_rules(db, v["voucher_no"], vid, final_cashier,
+                               amount, final_date, cur)
     db.commit()
-    return jsonify({"ok": True, "status": STATUS_PENDING})
+    return jsonify({"ok": True, "status": STATUS_PENDING, "alerts": alerts})
 
 
 @app.route("/api/vouchers/<int:vid>/review", methods=["POST"])
@@ -755,8 +823,10 @@ def api_import_csv():
                     vno, shift_code, shift_date, cashier, diff_f, reason, remark,
                     status, created_by, created_by, filename
                 ))
+                imported_vid = cur.lastrowid
                 add_timeline(cur, vno, "导入", user["username"], user["role"],
                              f"从文件 {filename} 导入，导入状态：{status}")
+                check_alert_rules(db, vno, imported_vid, cashier, diff_f, shift_date, cur)
                 success += 1
             except Exception as e:
                 failed += 1
@@ -785,11 +855,346 @@ def api_import_csv():
     })
 
 
+RULE_TYPE_SINGLE = "single_amount"
+RULE_TYPE_CUMULATIVE = "cumulative_amount"
+RULE_TYPE_CONSECUTIVE_RETURN = "consecutive_return"
+
+RULE_TYPE_LABELS = {
+    RULE_TYPE_SINGLE: "单笔差异金额阈值",
+    RULE_TYPE_CUMULATIVE: "同一收银员当天累计差异阈值",
+    RULE_TYPE_CONSECUTIVE_RETURN: "连续退回次数",
+}
+
+
+def check_alert_rules(db, voucher_no, voucher_id, cashier, diff_amount, shift_date, cur):
+    rules = db.execute(
+        "SELECT * FROM alert_rules WHERE enabled = 1"
+    ).fetchall()
+
+    triggered = []
+
+    for rule in rules:
+        hit = False
+        reason = ""
+
+        if rule["rule_type"] == RULE_TYPE_SINGLE:
+            if abs(diff_amount) >= rule["threshold"]:
+                hit = True
+                reason = f"单笔差异金额 ¥{abs(diff_amount):.2f} ≥ 阈值 ¥{rule['threshold']:.2f}"
+
+        elif rule["rule_type"] == RULE_TYPE_CUMULATIVE:
+            row = db.execute("""
+                SELECT COALESCE(SUM(ABS(diff_amount)), 0) AS total
+                FROM vouchers
+                WHERE cashier = ? AND shift_date = ? AND status != 'revoked'
+            """, (cashier, shift_date)).fetchone()
+            cumulative = row["total"]
+            if cumulative >= rule["threshold"]:
+                hit = True
+                reason = f"收银员 {cashier} 当天累计差异 ¥{cumulative:.2f} ≥ 阈值 ¥{rule['threshold']:.2f}"
+
+        elif rule["rule_type"] == RULE_TYPE_CONSECUTIVE_RETURN:
+            returned_count = db.execute("""
+                SELECT COUNT(*) AS cnt FROM vouchers
+                WHERE cashier = ? AND status = 'returned'
+            """, (cashier,)).fetchone()["cnt"]
+            if returned_count >= int(rule["threshold"]):
+                hit = True
+                reason = f"收银员 {cashier} 退回次数 {returned_count} ≥ 阈值 {int(rule['threshold'])}"
+
+        if hit:
+            if cur is None:
+                c = db.cursor()
+            else:
+                c = cur
+            c.execute("""
+                INSERT INTO alert_logs (voucher_no, voucher_id, rule_id, rule_name, rule_type, alert_reason)
+                VALUES (?, ?, ?, ?, ?, ?)
+            """, (voucher_no, voucher_id, rule["id"], rule["name"], rule["rule_type"], reason))
+            triggered.append({"rule_name": rule["name"], "rule_type": rule["rule_type"], "reason": reason})
+
+    return triggered
+
+
+def get_voucher_alerts(db, voucher_no):
+    rows = db.execute(
+        "SELECT * FROM alert_logs WHERE voucher_no = ? ORDER BY id ASC",
+        (voucher_no,)
+    ).fetchall()
+    return [row_to_dict(r) for r in rows]
+
+
 @app.route("/api/import_logs")
 @login_required
 def api_import_logs():
     db = get_db()
     rows = db.execute("SELECT * FROM import_log ORDER BY id DESC LIMIT 100").fetchall()
+    return jsonify({"logs": [row_to_dict(r) for r in rows]})
+
+
+# ---------- Alert Rules ---------- #
+
+@app.route("/api/alert-rules", methods=["GET"])
+@login_required
+def api_list_alert_rules():
+    db = get_db()
+    rows = db.execute("SELECT * FROM alert_rules ORDER BY id ASC").fetchall()
+    return jsonify({"rules": [row_to_dict(r) for r in rows]})
+
+
+@app.route("/api/alert-rules", methods=["POST"])
+@role_required(ROLE_ADMIN, ROLE_MANAGER)
+def api_create_alert_rule():
+    data = request.get_json(force=True, silent=True) or {}
+    name = (data.get("name") or "").strip()
+    rule_type = (data.get("rule_type") or "").strip()
+    threshold = data.get("threshold")
+    description = (data.get("description") or "").strip()
+    enabled = 1 if data.get("enabled", True) else 0
+
+    if not name:
+        return jsonify({"error": "规则名称不能为空"}), 400
+    if rule_type not in (RULE_TYPE_SINGLE, RULE_TYPE_CUMULATIVE, RULE_TYPE_CONSECUTIVE_RETURN):
+        return jsonify({"error": f"规则类型无效，可选：{','.join(RULE_TYPE_LABELS.keys())}"}), 400
+    if threshold is None:
+        return jsonify({"error": "阈值不能为空"}), 400
+    try:
+        threshold = float(threshold)
+    except (TypeError, ValueError):
+        return jsonify({"error": "阈值必须是数字"}), 400
+    if threshold <= 0:
+        return jsonify({"error": "阈值必须大于0"}), 400
+
+    user = current_user()
+    db = get_db()
+    try:
+        cur = db.cursor()
+        cur.execute("""
+            INSERT INTO alert_rules (name, rule_type, threshold, enabled, description, created_by)
+            VALUES (?, ?, ?, ?, ?, ?)
+        """, (name, rule_type, threshold, enabled, description, user["username"]))
+        rule_id = cur.lastrowid
+        add_operation_log(cur, "创建预警规则", user["username"], user["role"],
+                         f"规则名={name}, 类型={rule_type}, 阈值={threshold}")
+        db.commit()
+    except sqlite3.IntegrityError:
+        return jsonify({"error": "规则名称已存在"}), 400
+
+    return jsonify({"ok": True, "id": rule_id})
+
+
+@app.route("/api/alert-rules/<int:rule_id>", methods=["PUT"])
+@role_required(ROLE_ADMIN, ROLE_MANAGER)
+def api_update_alert_rule(rule_id):
+    data = request.get_json(force=True, silent=True) or {}
+    db = get_db()
+    existing = db.execute("SELECT * FROM alert_rules WHERE id = ?", (rule_id,)).fetchone()
+    if not existing:
+        return jsonify({"error": "规则不存在"}), 404
+
+    name = (data.get("name") or existing["name"]).strip()
+    rule_type = (data.get("rule_type") or existing["rule_type"]).strip()
+    threshold = data.get("threshold")
+    if threshold is not None:
+        try:
+            threshold = float(threshold)
+        except (TypeError, ValueError):
+            return jsonify({"error": "阈值必须是数字"}), 400
+        if threshold <= 0:
+            return jsonify({"error": "阈值必须大于0"}), 400
+    else:
+        threshold = existing["threshold"]
+    description = (data.get("description") or existing["description"]).strip()
+    enabled = 1 if data.get("enabled", bool(existing["enabled"])) else 0
+
+    if rule_type not in (RULE_TYPE_SINGLE, RULE_TYPE_CUMULATIVE, RULE_TYPE_CONSECUTIVE_RETURN):
+        return jsonify({"error": "规则类型无效"}), 400
+
+    user = current_user()
+    cur = db.cursor()
+    try:
+        cur.execute("""
+            UPDATE alert_rules SET name=?, rule_type=?, threshold=?, enabled=?,
+                description=?, updated_at=datetime('now','localtime')
+            WHERE id=?
+        """, (name, rule_type, threshold, enabled, description, rule_id))
+        add_operation_log(cur, "更新预警规则", user["username"], user["role"],
+                         f"规则ID={rule_id}, 名称={name}, 类型={rule_type}, 阈值={threshold}")
+        db.commit()
+    except sqlite3.IntegrityError:
+        return jsonify({"error": "规则名称已存在"}), 400
+
+    return jsonify({"ok": True})
+
+
+@app.route("/api/alert-rules/<int:rule_id>", methods=["DELETE"])
+@role_required(ROLE_ADMIN, ROLE_MANAGER)
+def api_delete_alert_rule(rule_id):
+    db = get_db()
+    existing = db.execute("SELECT * FROM alert_rules WHERE id = ?", (rule_id,)).fetchone()
+    if not existing:
+        return jsonify({"error": "规则不存在"}), 404
+
+    user = current_user()
+    cur = db.cursor()
+    cur.execute("DELETE FROM alert_rules WHERE id = ?", (rule_id,))
+    add_operation_log(cur, "删除预警规则", user["username"], user["role"],
+                     f"规则ID={rule_id}, 名称={existing['name']}")
+    db.commit()
+    return jsonify({"ok": True})
+
+
+@app.route("/api/alert-rules/export.csv")
+@role_required(ROLE_ADMIN, ROLE_MANAGER)
+def api_export_alert_rules_csv():
+    db = get_db()
+    rows = db.execute("SELECT * FROM alert_rules ORDER BY id ASC").fetchall()
+
+    buf = io.StringIO()
+    buf.write("\ufeff")
+    writer = csv.writer(buf)
+    writer.writerow(["规则名称", "规则类型", "阈值", "是否启用", "描述"])
+    for r in rows:
+        writer.writerow([
+            r["name"], r["rule_type"], r["threshold"],
+            "是" if r["enabled"] else "否", r["description"] or ""
+        ])
+    output = buf.getvalue().encode("utf-8")
+    resp = make_response(output)
+    resp.headers["Content-Type"] = "text/csv; charset=utf-8"
+    fn = f"alert_rules_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+    resp.headers["Content-Disposition"] = f'attachment; filename="{fn}"'
+    return resp
+
+
+@app.route("/api/alert-rules/import", methods=["POST"])
+@role_required(ROLE_ADMIN, ROLE_MANAGER)
+def api_import_alert_rules_csv():
+    if "file" not in request.files:
+        return jsonify({"error": "未上传文件"}), 400
+    f = request.files["file"]
+    user = current_user()
+    filename = f.filename or "import_rules.csv"
+
+    raw = f.stream.read()
+    text = None
+    for enc in ("utf-8-sig", "utf-8", "gbk"):
+        try:
+            text = raw.decode(enc)
+            break
+        except UnicodeDecodeError:
+            continue
+    if text is None:
+        return jsonify({"error": "无法识别文件编码"}), 400
+
+    reader = csv.DictReader(io.StringIO(text))
+
+    def col(row, *names):
+        for n in names:
+            if n in row and row[n] is not None:
+                val = str(row[n]).strip()
+                if val:
+                    return val
+        return ""
+
+    db = get_db()
+    cur = db.cursor()
+    total = 0
+    success = 0
+    skipped = 0
+    failed = 0
+    details = []
+
+    for i, row in enumerate(reader, start=1):
+        total += 1
+        try:
+            name = col(row, "规则名称", "name")
+            rule_type = col(row, "规则类型", "rule_type")
+            threshold_str = col(row, "阈值", "threshold")
+            enabled_str = col(row, "是否启用", "enabled")
+            description = col(row, "描述", "description")
+
+            if not name:
+                raise ValueError("规则名称不能为空")
+            if rule_type not in (RULE_TYPE_SINGLE, RULE_TYPE_CUMULATIVE, RULE_TYPE_CONSECUTIVE_RETURN):
+                raise ValueError(f"规则类型无效：{rule_type}")
+            if not threshold_str:
+                raise ValueError("阈值不能为空")
+            try:
+                threshold = float(threshold_str)
+            except (TypeError, ValueError):
+                raise ValueError(f"阈值必须是数字：{threshold_str}")
+            if threshold <= 0:
+                raise ValueError("阈值必须大于0")
+
+            enabled = 1
+            if enabled_str:
+                enabled = 0 if enabled_str in ("否", "0", "false", "False") else 1
+
+            existing = cur.execute("SELECT id FROM alert_rules WHERE name = ?", (name,)).fetchone()
+            if existing:
+                skipped += 1
+                details.append(f"第{i}行：规则名称「{name}」已存在，跳过")
+                continue
+
+            cur.execute("""
+                INSERT INTO alert_rules (name, rule_type, threshold, enabled, description, created_by)
+                VALUES (?, ?, ?, ?, ?, ?)
+            """, (name, rule_type, threshold, enabled, description, user["username"]))
+            success += 1
+        except ValueError as e:
+            failed += 1
+            details.append(f"第{i}行：{str(e)}")
+
+    add_operation_log(cur, "导入预警规则", user["username"], user["role"],
+                     f"文件={filename}, 总数={total}, 成功={success}, 跳过={skipped}, 失败={failed}")
+    db.commit()
+
+    return jsonify({
+        "ok": True,
+        "total": total,
+        "success": success,
+        "skipped": skipped,
+        "failed": failed,
+        "details": details
+    })
+
+
+# ---------- Alert Logs ---------- #
+
+@app.route("/api/alert-logs", methods=["GET"])
+@login_required
+def api_list_alert_logs():
+    voucher_no = request.args.get("voucher_no") or ""
+    db = get_db()
+    if voucher_no:
+        rows = db.execute(
+            "SELECT * FROM alert_logs WHERE voucher_no = ? ORDER BY id DESC",
+            (voucher_no,)
+        ).fetchall()
+    else:
+        rows = db.execute(
+            "SELECT * FROM alert_logs ORDER BY id DESC LIMIT 200"
+        ).fetchall()
+    return jsonify({"logs": [row_to_dict(r) for r in rows]})
+
+
+# ---------- Operation Logs ---------- #
+
+@app.route("/api/operation-logs", methods=["GET"])
+@role_required(ROLE_ADMIN, ROLE_MANAGER)
+def api_list_operation_logs():
+    action = request.args.get("action") or ""
+    db = get_db()
+    if action:
+        rows = db.execute(
+            "SELECT * FROM operation_log WHERE action LIKE ? ORDER BY id DESC LIMIT 200",
+            (f"%{action}%",)
+        ).fetchall()
+    else:
+        rows = db.execute(
+            "SELECT * FROM operation_log ORDER BY id DESC LIMIT 200"
+        ).fetchall()
     return jsonify({"logs": [row_to_dict(r) for r in rows]})
 
 

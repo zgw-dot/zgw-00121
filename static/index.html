@@ -82,6 +82,7 @@ tbody tr:hover{background:#f9fafb}
 .alert-danger{background:#fef2f2;border:1px solid #fecaca;color:#991b1b}
 .alert-success{background:#ecfdf5;border:1px solid #a7f3d0;color:#065f46}
 .alert-info{background:#eff6ff;border:1px solid #bfdbfe;color:#1e40af}
+.alert-warning{background:#fffbeb;border:1px solid #fde68a;color:#92400e}
 .close-x{cursor:pointer;font-size:22px;color:#9ca3af;background:none;border:none;padding:0 6px}
 .close-x:hover{color:#374151}
 .file-upload{display:flex;gap:8px;align-items:center}
@@ -91,6 +92,28 @@ tbody tr:hover{background:#f9fafb}
 .voucher-info{background:#f8fafc;border-radius:8px;padding:16px;margin-bottom:16px;font-size:13px;line-height:1.8}
 .voucher-info .label{color:#6b7280;display:inline-block;width:100px}
 .hidden{display:none}
+.alert-tag{display:inline-block;background:#fef3c7;color:#92400e;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:600;margin-left:6px;vertical-align:middle}
+.alert-tag::before{content:"⚠ "}
+.alert-box{background:#fffbeb;border:1px solid #fde68a;border-radius:8px;padding:12px 16px;margin-bottom:12px;font-size:13px;color:#92400e}
+.alert-box .alert-item{margin:4px 0;padding:4px 0;border-bottom:1px solid #fef3c7}
+.alert-box .alert-item:last-child{border-bottom:none}
+.alert-box .alert-item strong{color:#78350f}
+.tab-bar{display:flex;gap:8px;margin-bottom:16px;border-bottom:2px solid #e5e7eb;padding-bottom:8px}
+.tab-bar .tab{padding:6px 16px;border-radius:6px 6px 0 0;cursor:pointer;font-size:14px;font-weight:500;color:#6b7280;background:transparent;border:none;transition:all .2s}
+.tab-bar .tab.active{color:#1e40af;background:#dbeafe;border-bottom:2px solid #2563eb;margin-bottom:-2px}
+.tab-bar .tab:hover{color:#2563eb}
+.rule-card{background:#f9fafb;border:1px solid #e5e7eb;border-radius:8px;padding:12px 16px;margin-bottom:10px;display:flex;justify-content:space-between;align-items:center}
+.rule-card .rule-info{flex:1}
+.rule-card .rule-name{font-weight:600;color:#111827;font-size:14px}
+.rule-card .rule-desc{font-size:12px;color:#6b7280;margin-top:4px}
+.rule-card .rule-meta{font-size:12px;color:#9ca3af;margin-top:2px}
+.rule-card .rule-actions{display:flex;gap:6px;align-items:center}
+.rule-card.disabled{opacity:.6;background:#f3f4f6}
+.log-table{width:100%;border-collapse:collapse;font-size:12px}
+.log-table th{background:#f8fafc;padding:8px;text-align:left;font-size:11px;color:#6b7280;border-bottom:1px solid #e5e7eb}
+.log-table td{padding:8px;border-bottom:1px solid #f3f4f6;color:#4b5563}
+.panel-section{margin-bottom:24px}
+.panel-section h3{font-size:15px;color:#111827;margin-bottom:12px;padding-bottom:8px;border-bottom:1px solid #e5e7eb}
 @media(max-width:768px){.row{grid-template-columns:1fr}.toolbar .form-group{min-width:100%}}
 </style>
 </head>
@@ -106,64 +129,111 @@ tbody tr:hover{background:#f9fafb}
     </div>
   </div>
   <div class="container">
-    <div class="summary" id="summary"></div>
-    <div class="toolbar">
-      <div class="form-group">
-        <label>班次筛选</label>
-        <select id="filterShift"><option value="">全部班次</option></select>
-      </div>
-      <div class="form-group">
-        <label>处理人</label>
-        <select id="filterHandler"><option value="">全部</option></select>
-      </div>
-      <div class="form-group">
-        <label>状态</label>
-        <select id="filterStatus">
-          <option value="">全部</option>
-          <option value="draft">草稿</option>
-          <option value="pending">待复核</option>
-          <option value="reviewed">复核通过</option>
-          <option value="returned">已退回</option>
-          <option value="closed">已关闭</option>
-          <option value="revoked">已撤销</option>
-        </select>
-      </div>
-      <div class="form-group">
-        <label>关键词</label>
-        <input id="filterKeyword" placeholder="单号/收银员/备注">
-      </div>
-      <div class="form-group">
-        <button class="btn btn-gray btn-sm" onclick="loadVouchers()">查询</button>
-      </div>
-      <div class="spacer"></div>
-      {% if user.role in ['cashier','admin','manager'] %}
-      <button class="btn btn-primary" onclick="openCreate()">＋ 新建单据</button>
-      {% endif %}
-      <button class="btn btn-success btn-outline" onclick="exportCSV()">导出 CSV</button>
-      {% if user.role in ['admin','manager','cashier'] %}
-      <button class="btn btn-warning" onclick="document.getElementById('importFile').click()">导入 CSV</button>
-      <input id="importFile" type="file" accept=".csv" class="hidden" onchange="importCSV(this)">
+    <div class="tab-bar" id="mainTabs">
+      <button class="tab active" onclick="switchTab('vouchers')">📋 单据管理</button>
+      <button class="tab" onclick="switchTab('alertPanel')">🚨 异常预警</button>
+      {% if user.role in ['admin','manager'] %}
+      <button class="tab" onclick="switchTab('opLogs')">📜 操作日志</button>
       {% endif %}
     </div>
-    <div class="table-wrap">
-      <table>
-        <thead>
-          <tr>
-            <th>单据编号</th>
-            <th>班次</th>
-            <th>班次日期</th>
-            <th>收银员</th>
-            <th>差异金额</th>
-            <th>原因</th>
-            <th>状态</th>
-            <th>创建人</th>
-            <th>操作时间</th>
-            <th>操作</th>
-          </tr>
-        </thead>
-        <tbody id="voucherList"></tbody>
-      </table>
-      <div id="emptyTip" class="empty hidden">暂无数据</div>
+    <div id="tabVouchers">
+      <div class="summary" id="summary"></div>
+      <div class="toolbar">
+        <div class="form-group">
+          <label>班次筛选</label>
+          <select id="filterShift"><option value="">全部班次</option></select>
+        </div>
+        <div class="form-group">
+          <label>处理人</label>
+          <select id="filterHandler"><option value="">全部</option></select>
+        </div>
+        <div class="form-group">
+          <label>状态</label>
+          <select id="filterStatus">
+            <option value="">全部</option>
+            <option value="draft">草稿</option>
+            <option value="pending">待复核</option>
+            <option value="reviewed">复核通过</option>
+            <option value="returned">已退回</option>
+            <option value="closed">已关闭</option>
+            <option value="revoked">已撤销</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label>关键词</label>
+          <input id="filterKeyword" placeholder="单号/收银员/备注">
+        </div>
+        <div class="form-group">
+          <button class="btn btn-gray btn-sm" onclick="loadVouchers()">查询</button>
+        </div>
+        <div class="spacer"></div>
+        {% if user.role in ['cashier','admin','manager'] %}
+        <button class="btn btn-primary" onclick="openCreate()">＋ 新建单据</button>
+        {% endif %}
+        <button class="btn btn-success btn-outline" onclick="exportCSV()">导出 CSV</button>
+        {% if user.role in ['admin','manager','cashier'] %}
+        <button class="btn btn-warning" onclick="document.getElementById('importFile').click()">导入 CSV</button>
+        <input id="importFile" type="file" accept=".csv" class="hidden" onchange="importCSV(this)">
+        {% endif %}
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>单据编号</th>
+              <th>班次</th>
+              <th>班次日期</th>
+              <th>收银员</th>
+              <th>差异金额</th>
+              <th>原因</th>
+              <th>状态</th>
+              <th>预警</th>
+              <th>创建人</th>
+              <th>操作时间</th>
+              <th>操作</th>
+            </tr>
+          </thead>
+          <tbody id="voucherList"></tbody>
+        </table>
+        <div id="emptyTip" class="empty hidden">暂无数据</div>
+      </div>
+    </div>
+    <div id="tabAlertPanel" class="hidden">
+      <div class="panel-section">
+        <h3>📊 预警规则管理
+          {% if user.role in ['admin','manager'] %}
+          <button class="btn btn-sm btn-primary" style="margin-left:12px" onclick="openCreateRule()">＋ 新建规则</button>
+          <button class="btn btn-sm btn-success btn-outline" onclick="exportAlertRulesCSV()">导出规则</button>
+          <button class="btn btn-sm btn-warning" onclick="document.getElementById('importRuleFile').click()">导入规则</button>
+          <input id="importRuleFile" type="file" accept=".csv" class="hidden" onchange="importAlertRulesCSV(this)">
+          {% endif %}
+        </h3>
+        <div id="ruleList"></div>
+      </div>
+      <div class="panel-section">
+        <h3>🔔 预警记录</h3>
+        <div class="table-wrap">
+          <table class="log-table">
+            <thead>
+              <tr><th>时间</th><th>单据编号</th><th>规则名称</th><th>规则类型</th><th>预警原因</th></tr>
+            </thead>
+            <tbody id="alertLogList"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+    <div id="tabOpLogs" class="hidden">
+      <div class="panel-section">
+        <h3>📜 操作日志</h3>
+        <div class="table-wrap">
+          <table class="log-table">
+            <thead>
+              <tr><th>时间</th><th>操作</th><th>操作人</th><th>角色</th><th>详情</th></tr>
+            </thead>
+            <tbody id="opLogList"></tbody>
+          </table>
+        </div>
+      </div>
     </div>
   </div>
 </div>
@@ -219,6 +289,7 @@ tbody tr:hover{background:#f9fafb}
     </div>
     <div class="modal-body">
       <div id="detailAlert"></div>
+      <div id="detailAlertBox"></div>
       <div id="detailContent"></div>
       <div id="detailActions"></div>
       <div id="detailTimeline"></div>
@@ -286,6 +357,47 @@ tbody tr:hover{background:#f9fafb}
   </div>
 </div>
 
+{% if user.role in ['admin','manager'] %}
+<div class="modal-mask" id="ruleModal">
+  <div class="modal">
+    <div class="modal-header">
+      <h2 id="ruleModalTitle">新建预警规则</h2>
+      <button class="close-x" onclick="closeModal('ruleModal')">×</button>
+    </div>
+    <div class="modal-body">
+      <div id="ruleAlert"></div>
+      <div class="form-group">
+        <label>规则名称 <span style="color:#ef4444">*</span></label>
+        <input id="ruleName" placeholder="如：单笔差异超500元预警">
+      </div>
+      <div class="form-group">
+        <label>规则类型 <span style="color:#ef4444">*</span></label>
+        <select id="ruleType">
+          <option value="single_amount">单笔差异金额阈值</option>
+          <option value="cumulative_amount">同一收银员当天累计差异阈值</option>
+          <option value="consecutive_return">连续退回次数</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label>阈值 <span style="color:#ef4444">*</span></label>
+        <input id="ruleThreshold" type="number" step="0.01" min="0.01" placeholder="金额或次数">
+      </div>
+      <div class="form-group">
+        <label>描述</label>
+        <input id="ruleDesc" placeholder="规则说明（可选）">
+      </div>
+      <div class="form-group">
+        <label><input type="checkbox" id="ruleEnabled" checked> 启用规则</label>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-gray" onclick="closeModal('ruleModal')">取消</button>
+      <button class="btn btn-primary" onclick="saveRule()">保存</button>
+    </div>
+  </div>
+</div>
+{% endif %}
+
 {% else %}
 <div class="login-wrap">
   <div class="login-box">
@@ -319,12 +431,18 @@ const STATUS_TEXT = {
   draft:'草稿', pending:'待复核', reviewed:'复核通过',
   returned:'已退回', closed:'已关闭', revoked:'已撤销'
 };
+const RULE_TYPE_TEXT = {
+  single_amount:'单笔差异金额阈值',
+  cumulative_amount:'同一收银员当天累计差异阈值',
+  consecutive_return:'连续退回次数'
+};
 let editingId = null;
 let currentVoucher = null;
 let tempReviewVid = null;
 let tempAction = null;
 let tempRevokeVid = null;
 let tempCloseVid = null;
+let editingRuleId = null;
 
 async function api(url, opt={}) {
   const o = Object.assign({headers:{'Content-Type':'application/json'}, credentials:'same-origin'}, opt);
@@ -344,6 +462,19 @@ async function doLogin(){}
 async function logout(){
   await api('/api/logout', {method:'POST'});
   location.reload();
+}
+
+function switchTab(tab){
+  document.getElementById('tabVouchers').classList.toggle('hidden', tab!=='vouchers');
+  document.getElementById('tabAlertPanel').classList.toggle('hidden', tab!=='alertPanel');
+  const opTab = document.getElementById('tabOpLogs');
+  if(opTab) opTab.classList.toggle('hidden', tab!=='opLogs');
+  document.querySelectorAll('#mainTabs .tab').forEach((t,i)=>{
+    const tabs=['vouchers','alertPanel','opLogs'];
+    t.classList.toggle('active', tabs[i]===tab);
+  });
+  if(tab==='alertPanel') loadAlertPanel();
+  if(tab==='opLogs') loadOpLogs();
 }
 
 async function init() {
@@ -389,6 +520,12 @@ function renderSummary(d){
     cell('revoked','已撤销', '', '撤销保留历史');
 }
 
+function renderAlertTag(warnings){
+  if(!warnings || warnings.length===0) return '<span style="color:#d1d5db">—</span>';
+  const titles = warnings.map(w=>w.rule_name).join('、');
+  return `<span class="alert-tag" title="${titles}">⚠ ${warnings.length}条预警</span>`;
+}
+
 function renderList(list){
   const tb = document.getElementById('voucherList');
   tb.innerHTML = '';
@@ -404,6 +541,7 @@ function renderList(list){
       <td class="amount ${amtCls}">¥${Number(v.diff_amount).toFixed(2)}</td>
       <td style="max-width:180px;overflow:hidden;text-overflow:ellipsis" title="${v.reason||''}">${v.reason||'<span style="color:#d1d5db">—</span>'}</td>
       <td><span class="status status-${v.status}">${STATUS_TEXT[v.status]||v.status}</span></td>
+      <td>${renderAlertTag(v.warning_reasons)}</td>
       <td>${v.created_by}</td>
       <td style="font-size:12px;color:#9ca3af">${v.updated_at}</td>
       <td class="actions">${act}</td>
@@ -501,24 +639,45 @@ async function submitForm(mode){
     const url = `/api/vouchers/${editingId}/submit`;
     const r = await api(url, {method:'POST', body:data});
     if(!r.ok){ showAlert('createAlert', r.error, 'danger'); return; }
+    if(r.data.alerts && r.data.alerts.length>0){
+      const alertMsg = r.data.alerts.map(a=>a.reason).join('\n');
+      showAlert('createAlert', '⚠ 预警触发：' + alertMsg, 'warning');
+    }
     if(mode==='submit'){
       closeModal('createModal');
-      alert('提交成功，等待值班长复核');
+      let msg = '提交成功，等待值班长复核';
+      if(r.data.alerts && r.data.alerts.length>0){
+        msg += '\n\n⚠ 触发预警规则：\n' + r.data.alerts.map(a=>a.reason).join('\n');
+      }
+      alert(msg);
       loadVouchers();
     }
   } else {
     const r = await api('/api/vouchers', {method:'POST', body:data});
     if(!r.ok){ showAlert('createAlert', r.error, 'danger'); return; }
     editingId = r.data.id;
+    let alertInfo = '';
+    if(r.data.alerts && r.data.alerts.length>0){
+      alertInfo = r.data.alerts;
+    }
     if(mode==='submit'){
       const r2 = await api(`/api/vouchers/${editingId}/submit`, {method:'POST', body:data});
       if(!r2.ok){ showAlert('createAlert', r2.error, 'danger'); return; }
       closeModal('createModal');
-      alert('单据已创建并提交复核，单号：'+r.data.voucher_no);
+      let msg = '单据已创建并提交复核，单号：'+r.data.voucher_no;
+      const allAlerts = [...(alertInfo||[]), ...(r2.data.alerts||[])];
+      if(allAlerts.length>0){
+        msg += '\n\n⚠ 触发预警规则：\n' + allAlerts.map(a=>a.reason).join('\n');
+      }
+      alert(msg);
       loadVouchers();
     } else {
       closeModal('createModal');
-      alert('草稿已保存：'+r.data.voucher_no);
+      let msg = '草稿已保存：'+r.data.voucher_no;
+      if(alertInfo && alertInfo.length>0){
+        msg += '\n\n⚠ 触发预警规则：\n' + alertInfo.map(a=>a.reason).join('\n');
+      }
+      alert(msg);
       loadVouchers();
     }
   }
@@ -530,10 +689,23 @@ async function openDetail(vid){
   currentVoucher = r.data.voucher;
   const v = currentVoucher;
   const amtCls = v.diff_amount<0?'neg':'pos';
+  const alerts = r.data.alerts || [];
+
+  let alertBoxHtml = '';
+  if(alerts.length>0){
+    alertBoxHtml = `<div class="alert-box"><strong>⚠ 异常预警 (${alerts.length}条)</strong>`;
+    alerts.forEach(a=>{
+      alertBoxHtml += `<div class="alert-item"><strong>${a.rule_name}</strong> [${RULE_TYPE_TEXT[a.rule_type]||a.rule_type}]：${a.alert_reason}</div>`;
+    });
+    alertBoxHtml += '</div>';
+  }
+  document.getElementById('detailAlertBox').innerHTML = alertBoxHtml;
+
   document.getElementById('detailContent').innerHTML = `
     <div class="voucher-info">
       <div><span class="label">单据编号:</span><b>${v.voucher_no}</b>
         <span class="status status-${v.status}" style="margin-left:12px">${STATUS_TEXT[v.status]}</span>
+        ${alerts.length>0?'<span class="alert-tag">⚠ 预警</span>':''}
       </div>
       <div><span class="label">关联原单:</span>${v.parent_voucher_no||'无'}</div>
       <div><span class="label">班 次:</span>${v.shift_code} / ${v.shift_date}</div>
@@ -674,6 +846,173 @@ async function importCSV(input){
     alert('导入异常：'+e.message);
     input.value='';
   }
+}
+
+// ---------- Alert Rules ---------- //
+
+async function loadAlertPanel(){
+  const [rules, logs] = await Promise.all([
+    api('/api/alert-rules'),
+    api('/api/alert-logs')
+  ]);
+  renderRuleList(rules.data?.rules || []);
+  renderAlertLogs(logs.data?.logs || []);
+}
+
+function renderRuleList(rules){
+  const el = document.getElementById('ruleList');
+  if(!rules.length){
+    el.innerHTML = '<div class="empty" style="padding:30px">暂无预警规则</div>';
+    return;
+  }
+  const isMgr = ['admin','manager'].includes(ROLE);
+  el.innerHTML = rules.map(r=>`
+    <div class="rule-card ${r.enabled?'':'disabled'}">
+      <div class="rule-info">
+        <div class="rule-name">${r.name} ${r.enabled?'':'(已禁用)'}</div>
+        <div class="rule-desc">类型：${RULE_TYPE_TEXT[r.rule_type]||r.rule_type} | 阈值：${r.rule_type==='consecutive_return'?parseInt(r.threshold)+'次':'¥'+Number(r.threshold).toFixed(2)}</div>
+        <div class="rule-meta">${r.description||''} | 创建人：${r.created_by||'—'} | 更新：${r.updated_at||''}</div>
+      </div>
+      ${isMgr?`<div class="rule-actions">
+        <button class="btn btn-sm btn-outline" onclick="editRule(${r.id})">编辑</button>
+        <button class="btn btn-sm btn-${r.enabled?'warning':'success'}" onclick="toggleRule(${r.id},${r.enabled?0:1})">${r.enabled?'禁用':'启用'}</button>
+        <button class="btn btn-sm btn-danger" onclick="deleteRule(${r.id},'${r.name}')">删除</button>
+      </div>`:''}
+    </div>
+  `).join('');
+}
+
+function renderAlertLogs(logs){
+  const el = document.getElementById('alertLogList');
+  if(!logs.length){
+    el.innerHTML = '<tr><td colspan="5" style="text-align:center;color:#9ca3af;padding:20px">暂无预警记录</td></tr>';
+    return;
+  }
+  el.innerHTML = logs.map(l=>`
+    <tr>
+      <td>${l.created_at}</td>
+      <td style="cursor:pointer;color:#2563eb" onclick="switchTab('vouchers')">${l.voucher_no}</td>
+      <td>${l.rule_name}</td>
+      <td>${RULE_TYPE_TEXT[l.rule_type]||l.rule_type}</td>
+      <td>${l.alert_reason}</td>
+    </tr>
+  `).join('');
+}
+
+function openCreateRule(){
+  editingRuleId = null;
+  document.getElementById('ruleModalTitle').textContent = '新建预警规则';
+  document.getElementById('ruleName').value = '';
+  document.getElementById('ruleType').value = 'single_amount';
+  document.getElementById('ruleThreshold').value = '';
+  document.getElementById('ruleDesc').value = '';
+  document.getElementById('ruleEnabled').checked = true;
+  document.getElementById('ruleAlert').classList.add('hidden');
+  openModal('ruleModal');
+}
+
+async function editRule(ruleId){
+  const r = await api('/api/alert-rules');
+  if(!r.ok){ alert(r.error); return; }
+  const rule = r.data.rules.find(r=>r.id===ruleId);
+  if(!rule){ alert('规则不存在'); return; }
+  editingRuleId = ruleId;
+  document.getElementById('ruleModalTitle').textContent = '编辑预警规则';
+  document.getElementById('ruleName').value = rule.name;
+  document.getElementById('ruleType').value = rule.rule_type;
+  document.getElementById('ruleThreshold').value = rule.threshold;
+  document.getElementById('ruleDesc').value = rule.description||'';
+  document.getElementById('ruleEnabled').checked = !!rule.enabled;
+  document.getElementById('ruleAlert').classList.add('hidden');
+  openModal('ruleModal');
+}
+
+async function saveRule(){
+  const data = {
+    name: document.getElementById('ruleName').value.trim(),
+    rule_type: document.getElementById('ruleType').value,
+    threshold: document.getElementById('ruleThreshold').value,
+    description: document.getElementById('ruleDesc').value.trim(),
+    enabled: document.getElementById('ruleEnabled').checked
+  };
+  if(!data.name){ showAlert('ruleAlert','规则名称不能为空','danger'); return; }
+  if(!data.threshold){ showAlert('ruleAlert','阈值不能为空','danger'); return; }
+
+  let r;
+  if(editingRuleId){
+    r = await api(`/api/alert-rules/${editingRuleId}`, {method:'PUT', body:data});
+  } else {
+    r = await api('/api/alert-rules', {method:'POST', body:data});
+  }
+  if(!r.ok){ showAlert('ruleAlert', r.error, 'danger'); return; }
+  closeModal('ruleModal');
+  loadAlertPanel();
+}
+
+async function toggleRule(ruleId, newEnabled){
+  const r = await api(`/api/alert-rules/${ruleId}`, {
+    method:'PUT', body:{enabled:newEnabled}
+  });
+  if(!r.ok){ alert(r.error); return; }
+  loadAlertPanel();
+}
+
+async function deleteRule(ruleId, ruleName){
+  if(!confirm(`确定删除规则「${ruleName}」？`)) return;
+  const r = await api(`/api/alert-rules/${ruleId}`, {method:'DELETE'});
+  if(!r.ok){ alert(r.error); return; }
+  loadAlertPanel();
+}
+
+function exportAlertRulesCSV(){
+  location.href = '/api/alert-rules/export.csv';
+}
+
+async function importAlertRulesCSV(input){
+  const file = input.files[0];
+  if(!file) return;
+  const fd = new FormData();
+  fd.append('file', file);
+  try{
+    const r = await fetch('/api/alert-rules/import', {method:'POST', body:fd, credentials:'same-origin'});
+    const d = await r.json();
+    input.value='';
+    if(!r.ok || d.error){
+      alert('导入失败：'+(d.error||'HTTP '+r.status));
+      return;
+    }
+    let msg = `导入完成：共${d.total}条，成功${d.success}条，跳过${d.skipped}条，失败${d.failed}条。`;
+    if(d.details && d.details.length){
+      msg += '\n\n明细：\n' + d.details.slice(0,30).join('\n');
+    }
+    alert(msg);
+    loadAlertPanel();
+  }catch(e){
+    alert('导入异常：'+e.message);
+    input.value='';
+  }
+}
+
+// ---------- Operation Logs ---------- //
+
+async function loadOpLogs(){
+  const r = await api('/api/operation-logs');
+  if(!r.ok){ alert(r.error); return; }
+  const logs = r.data.logs || [];
+  const el = document.getElementById('opLogList');
+  if(!logs.length){
+    el.innerHTML = '<tr><td colspan="5" style="text-align:center;color:#9ca3af;padding:20px">暂无操作日志</td></tr>';
+    return;
+  }
+  el.innerHTML = logs.map(l=>`
+    <tr>
+      <td>${l.created_at}</td>
+      <td>${l.action}</td>
+      <td>${l.operator}</td>
+      <td>${l.operator_role||''}</td>
+      <td style="max-width:300px;overflow:hidden;text-overflow:ellipsis" title="${l.detail||''}">${l.detail||''}</td>
+    </tr>
+  `).join('');
 }
 
 init();
