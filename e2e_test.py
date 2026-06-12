@@ -1249,6 +1249,73 @@ def run():
         if assert_eq("Batch with invalid status returns 400", s, 400): passed += 1
         else: failed += 1
 
+        print("\n--- Test 32b: Batch Disposition - Cannot Revert to unprocessed (Status Rollback Prevention) ---")
+        s, d = man4.get(f"/api/vouchers/{vid_disp}")
+        already_alerts = d.get("alerts", [])
+        already_ids = [{"id": a["id"], "disposition_version": a["disposition_version"]} for a in already_alerts]
+        if expect("Test setup: target alerts are already processed",
+                  len(already_alerts) > 0 and already_alerts[0]["disposition_status"] != "unprocessed",
+                  f"first_status={already_alerts[0]['disposition_status'] if already_alerts else 'N/A'}"): passed += 1
+        else: failed += 1
+
+        orig_id = already_alerts[0]["id"]
+        orig_status_before = already_alerts[0]["disposition_status"]
+        orig_note_before = already_alerts[0].get("disposition_note")
+        orig_handler_before = already_alerts[0].get("disposition_handler")
+        orig_version_before = already_alerts[0]["disposition_version"]
+
+        s, d = man4.post("/api/alert-logs/batch-disposition", {
+            "disposition_status": "unprocessed",
+            "disposition_note": "恶意回退为未处理",
+            "items": already_ids
+        })
+        if assert_eq("Batch unprocessed returns 400 (rejected)", s, 400): passed += 1
+        else: failed += 1
+        if expect("Error message mentions only 3 allowed states",
+                  ("已确认" in (d.get("error","") or "")) and
+                  ("需跟进" in (d.get("error","") or "")) and
+                  ("已忽略" in (d.get("error","") or "")),
+                  f"error={d.get('error','')}"): passed += 1
+        else: failed += 1
+
+        con_check = sqlite3.connect(str(DB_PATH))
+        con_check.row_factory = sqlite3.Row
+        row_after = con_check.execute(
+            "SELECT disposition_status, disposition_note, disposition_handler, disposition_version "
+            "FROM alert_logs WHERE id = ?",
+            (orig_id,)
+        ).fetchone()
+        con_check.close()
+        if row_after is not None:
+            if assert_eq("SQLite: status NOT changed after unprocessed attempt",
+                         row_after["disposition_status"], orig_status_before): passed += 1
+            else: failed += 1
+            if assert_eq("SQLite: note NOT changed after unprocessed attempt",
+                         row_after["disposition_note"], orig_note_before): passed += 1
+            else: failed += 1
+            if assert_eq("SQLite: handler NOT changed after unprocessed attempt",
+                         row_after["disposition_handler"], orig_handler_before): passed += 1
+            else: failed += 1
+            if assert_eq("SQLite: version NOT incremented after unprocessed attempt",
+                         int(row_after["disposition_version"]), int(orig_version_before)): passed += 1
+            else: failed += 1
+        else:
+            print(f"{FAIL} SQLite row not found for id={orig_id}")
+            failed += 5
+
+        s, d = man4.get(f"/api/vouchers/{vid_disp}")
+        recheck = d.get("alerts", [])
+        if len(recheck) > 0:
+            if assert_eq("API recheck: status still unchanged",
+                         recheck[0]["disposition_status"], orig_status_before): passed += 1
+            else: failed += 1
+            if assert_eq("API recheck: version still unchanged",
+                         int(recheck[0]["disposition_version"]), int(orig_version_before)): passed += 1
+            else: failed += 1
+        else:
+            print(f"{FAIL} alerts vanished after test")
+            failed += 2
+
         print("\n--- Test 33: Batch Disposition - Not Found and Success Mixed ---")
         s, d = man4.get(f"/api/vouchers/{vid_disp}")
         real_alerts = d.get("alerts", [])

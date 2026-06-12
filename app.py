@@ -1366,8 +1366,9 @@ def api_batch_alert_disposition():
     status = (data.get("disposition_status") or "").strip()
     note = (data.get("disposition_note") or "").strip()
 
-    if status not in (DISP_UNPROCESSED, DISP_CONFIRMED, DISP_FOLLOW_UP, DISP_IGNORED):
-        return jsonify({"error": f"无效的处置状态，可选：{','.join(DISP_STATUS_LABELS.keys())}"}), 400
+    BATCH_DISP_ALLOWED = (DISP_CONFIRMED, DISP_FOLLOW_UP, DISP_IGNORED)
+    if status not in BATCH_DISP_ALLOWED:
+        return jsonify({"error": f"批量处置仅支持：已确认、需跟进、已忽略"}), 400
 
     if not items:
         return jsonify({"error": "未选择任何预警记录"}), 400
